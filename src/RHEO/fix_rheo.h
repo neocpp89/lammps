@@ -34,6 +34,7 @@ class FixRHEO : public Fix {
   void setup_pre_force(int) override;
   void setup(int) override;
   void pre_force(int) override;
+  void post_force(int) override;
   void initial_integrate(int) override;
   void final_integrate() override;
   void reset_dt() override;
@@ -72,7 +73,7 @@ class FixRHEO : public Fix {
 
 namespace RHEO_NS {
 
-  enum { QUINTIC, WENDLANDC4, RK0, RK1, RK2 };
+  enum { CUBIC, WENDLANDC4, QUINTIC, RK0, RK1, RK2 };
   enum { COORDINATION, DIVR };
 
   // Status variables

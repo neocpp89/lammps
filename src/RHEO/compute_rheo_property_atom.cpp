@@ -96,7 +96,9 @@ ComputeRHEOPropertyAtom::ComputeRHEOPropertyAtom(LAMMPS *lmp, int narg, char **a
     } else if (strcmp(arg[iarg], "status") == 0) {
       // Short hand for "rheo_status"
       pack_choice[i] = &ComputeRHEOPropertyAtom::pack_status;
-    } else if (strcmp(arg[iarg], "chi") == 0) {
+    } else if (strcmp(arg[iarg],"rho") == 0) {
+      pack_choice[i] = &ComputeRHEOPropertyAtom::pack_rho;
+    } else if (strcmp(arg[iarg],"chi") == 0) {
       interface_flag = 1;
       pack_choice[i] = &ComputeRHEOPropertyAtom::pack_chi;
     } else if (strcmp(arg[iarg], "surface") == 0) {
@@ -296,6 +298,21 @@ void ComputeRHEOPropertyAtom::pack_status(int n)
       buf[n] = status[i];
     else
       buf[n] = 0.0;
+    n += nvalues;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ComputeRHEOPropertyAtom::pack_rho(int n)
+{
+  double *rho = atom->rho;
+  int *mask = atom->mask;
+  int nlocal = atom->nlocal;
+
+  for (int i = 0; i < nlocal; i++) {
+    if (mask[i] & groupbit) buf[n] = rho[i];
+    else buf[n] = 0.0;
     n += nvalues;
   }
 }
@@ -560,6 +577,7 @@ int ComputeRHEOPropertyAtom::add_tensor_component(char *option, int i, FnPtrPack
 {
   int shift;
   int dim = domain->dimension;
+
   if (((std::string) option).back() == '*') {
     for (int a = 0; a < dim; a++) {
       for (int b = 0; b < dim; b++) {

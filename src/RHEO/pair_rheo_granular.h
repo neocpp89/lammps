@@ -13,21 +13,21 @@
 
 #ifdef PAIR_CLASS
 // clang-format off
-PairStyle(rheo,PairRHEO)
+PairStyle(rheo/granular,PairRHEOGranular)
 // clang-format on
 #else
 
-#ifndef LMP_PAIR_RHEO_H
-#define LMP_PAIR_RHEO_H
+#ifndef LMP_PAIR_RHEO_GRANULAR_H
+#define LMP_PAIR_RHEO_GRANULAR_H
 
 #include "pair.h"
 
 namespace LAMMPS_NS {
 
-class PairRHEO : public Pair {
+class PairRHEOGranular : public Pair {
  public:
-  PairRHEO(class LAMMPS *);
-  ~PairRHEO() override;
+  PairRHEOGranular(class LAMMPS *);
+  ~PairRHEOGranular() override;
   void compute(int, int) override;
   void settings(int, char **) override;
   void coeff(int, char **) override;
@@ -37,16 +37,10 @@ class PairRHEO : public Pair {
   void unpack_reverse_comm(int, int *, double *) override;
 
  protected:
-  double cutk, *csq, *rho0;    // From fix RHEO
-  double *cs, cutksq, cutkinv, cutkinv3, av, rho_damp;
-
-  int laplacian_order;
-  int artificial_visc_flag;
-  int rho_damp_flag;
-  int thermal_flag;
+  double h, hsq, rho0, csq, av, rho_damp;        // From fix RHEO
+  double **sdiv;
+  int nmax_store;
   int interface_flag;
-
-  int harmonic_means_flag;
 
   void allocate();
 
@@ -54,7 +48,6 @@ class PairRHEO : public Pair {
   class ComputeRHEOGrad *compute_grad;
   class ComputeRHEOInterface *compute_interface;
   class FixRHEO *fix_rheo;
-  class FixRHEOPressure *fix_pressure;
   class FixRHEOStress *fix_stress;
 };
 

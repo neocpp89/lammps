@@ -13,21 +13,21 @@
 
 #ifdef COMPUTE_CLASS
 // clang-format off
-ComputeStyle(RHEO/INTERFACE,ComputeRHEOInterface)
+ComputeStyle(RHEO/STRESS,ComputeRHEOStress)
 // clang-format on
 #else
 
-#ifndef LMP_COMPUTE_RHEO_INTERFACE_H
-#define LMP_COMPUTE_RHEO_INTERFACE_H
+#ifndef LMP_COMPUTE_RHEO_STRESS_H
+#define LMP_COMPUTE_RHEO_STRESS_H
 
 #include "compute.h"
 
 namespace LAMMPS_NS {
 
-class ComputeRHEOInterface : public Compute {
+class ComputeRHEOStress : public Compute {
  public:
-  ComputeRHEOInterface(class LAMMPS *, int, char **);
-  ~ComputeRHEOInterface() override;
+  ComputeRHEOStress(class LAMMPS *, int, char **);
+  ~ComputeRHEOStress() override;
   void init() override;
   void init_list(int, class NeighList *) override;
   void compute_peratom() override;
@@ -36,25 +36,41 @@ class ComputeRHEOInterface : public Compute {
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
   double memory_usage() override;
-  void correct_v(double *, double *, int, int);
-  void correct_stress(double *, double *, int, int);
-  double correct_rho(int);
-  void store_forces();
 
-  double *chi, **fp_store;
+  void update_one_material_point_stress_elastic(double *stress, const double *velocity_gradient, double density, double dt, int dim);
+  void update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);
+  // void update_one_material_point_stress(double *stress, const double *velocity_gradient, double density, double dt, int dim);
+  void one_element_test(void);
+
+  double **stress;
   class FixRHEO *fix_rheo;
 
  private:
-  int nmax_store, comm_stage, stress_flag;
-  double *rho0, cut, cutsq, wall_max;
-  double *norm, *normwf;
-
-  char *id_fix_pa;
+  int nmax_store;
 
   class NeighList *list;
-  class ComputeRHEOKernel *compute_kernel;
-  class FixRHEOPressure *fix_pressure;
-  class FixRHEOStress *fix_stress;
+
+  void grow_arrays(int);
+
+  // Set by input file
+  double RHO_CRITICAL;
+  double E;
+  double NU;
+  double COHESION;
+  double GRAINS_D;
+  double GRAINS_RHO;
+  double MU_S;
+  double MU_2;
+  double I_0;
+
+  // Derived elastic parameters
+  double G;
+  double K;
+  double LAMBDA;
+};
+
+enum {
+    NUM_STRESS_COMPONENTS = 32,
 };
 
 }    // namespace LAMMPS_NS

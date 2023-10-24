@@ -43,6 +43,8 @@ class ComputeRHEOKernel : public Compute {
   double calc_dw_quintic(double, double, double, double, double *, double *);
   double calc_w_wendlandc4(double);
   double calc_dw_wendlandc4(double, double, double, double, double *, double *);
+  double calc_w_cubic(int,int,double,double,double,double);
+  double calc_dw_cubic(int,int,double,double,double,double,double *,double *);
   void grow_arrays(int);
 
   double dWij[3], dWji[3], Wij, Wji;
@@ -59,7 +61,7 @@ class ComputeRHEOKernel : public Compute {
   int corrections_calculated;
   int kernel_style, zmin, dim, Mdim, ncor;
   int nmax_store;
-  double cut, cutsq, cutinv, cutsqinv, pre_w, pre_wp;
+  double cut, cutsq, cutinv, cutsqinv, pre_w, pre_wp, alpha_d;
   double ***C;
   double *C0;
 
