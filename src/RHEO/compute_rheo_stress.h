@@ -11,47 +11,43 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#ifdef PAIR_CLASS
+#ifdef COMPUTE_CLASS
 // clang-format off
-PairStyle(rheo/react,PairRHEOReact)
+ComputeStyle(RHEO/STRESS,ComputeRHEOStress)
 // clang-format on
 #else
 
-#ifndef LMP_PAIR_RHEO_REACT_H
-#define LMP_PAIR_RHEO_REACT_H
+#ifndef LMP_COMPUTE_RHEO_STRESS_H
+#define LMP_COMPUTE_RHEO_STRESS_H
 
-#include "pair.h"
+#include "compute.h"
 
 namespace LAMMPS_NS {
 
-class PairRHEOReact : public Pair {
+class ComputeRHEOStress : public Compute {
  public:
-  PairRHEOReact(class LAMMPS *);
-  virtual ~PairRHEOReact() override;
-  virtual void compute(int, int) override;
-  void settings(int, char **) override;
-  void coeff(int, char **) override;
-  void init_style() override;
-  void setup() override;
-  double init_one(int, int) override;
-  void write_restart(FILE *) override;
-  void read_restart(FILE *) override;
+  ComputeRHEOStress(class LAMMPS *, int, char **);
+  ~ComputeRHEOStress() override;
+  void init() override;
+  void init_list(int, class NeighList *) override;
+  void compute_peratom() override;
+  int pack_forward_comm(int, int *, double *, int, int *) override;
+  void unpack_forward_comm(int, int, double *) override;
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
+  double memory_usage() override;
 
- protected:
-  double **cut,**cutbond,**cutbsq, **k, **eps, **gamma, **t_form, **rlimit, **sigma, **krepel;
+  void update_one_material_point_stress(double *stress, const double *velocity_gradient, double density);
 
-  void allocate();
-  void transfer_history(double*, double*);
-
-  int size_history, nmax_store;
-  int *dbond, *nbond;
-  double dt;
-
-  class FixDummy *fix_dummy;
-  class FixNeighHistory *fix_history;
+  double **stress;
   class FixRHEO *fix_rheo;
+
+ private:
+  int nmax_store;
+
+  class NeighList *list;
+
+  void grow_arrays(int);
 };
 
 }    // namespace LAMMPS_NS

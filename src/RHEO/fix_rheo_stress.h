@@ -36,9 +36,12 @@ class FixRHEOStress : public Fix {
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
 
+  // Hack so I can set fix_rheo in this later
+  class Compute *stress_compute;
+
  private:
   char *id_compute, *id_fix;
-  class Compute *stress_compute;
+  // class Compute *stress_compute;
   class FixStoreAtom *store_fix;
 };
 

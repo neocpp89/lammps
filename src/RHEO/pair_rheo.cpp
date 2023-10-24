@@ -23,10 +23,12 @@
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_grad.h"
 #include "compute_rheo_interface.h"
+#include "compute_rheo_stress.h"
 #include "domain.h"
 #include "error.h"
 #include "fix_rheo.h"
 #include "fix_rheo_pressure.h"
+#include "fix_rheo_stress.h"
 #include "force.h"
 #include "math_extra.h"
 #include "memory.h"
@@ -48,7 +50,8 @@ static constexpr double EPSILON = 1e-2;
 
 PairRHEO::PairRHEO(LAMMPS *lmp) :
   Pair(lmp), compute_kernel(nullptr), compute_grad(nullptr),
-  compute_interface(nullptr), fix_rheo(nullptr), fix_pressure(nullptr)
+  compute_interface(nullptr), fix_rheo(nullptr), fix_pressure(nullptr),
+  fix_stress(nullptr)
 {
   restartinfo = 0;
   single_enable = 0;
@@ -445,6 +448,14 @@ void PairRHEO::setup()
   fixes = modify->get_fix_by_style("rheo/pressure");
   if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/pressure to use pair rheo");
   fix_pressure = dynamic_cast<FixRHEOPressure *>(fixes[0]);
+
+  // Also require rheo/stress
+  fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
+  fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+
+  // TODO: another Law of Demeter violation, figure out how to fix
+  dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
 
   compute_kernel = fix_rheo->compute_kernel;
   compute_grad = fix_rheo->compute_grad;

@@ -63,12 +63,13 @@ pair_coeff         * *
 
 # ------ Fixes & computes ------ #
 
-fix                1 all rheo ${cut} RK1 32 shift surface/detection coordination 26
+fix                1 all rheo ${cut} quintic 32 shift surface/detection coordination 26 5
 fix                2 all rheo/viscosity constant ${eta}
 fix                3 all rheo/pressure linear
-fix                4 rig setforce 0.0 0.0 0.0
-fix                5 fluid addforce 0.0 -${fext} 0.0
-fix                6 all balance 1000 1.1 rcb
+fix                4 all rheo/stress
+fix                5 rig setforce 0.0 0.0 0.0
+fix                6 fluid addforce 0.0 -${fext} 0.0
+fix                7 all balance 1000 1.1 rcb
 
 compute            1 all rheo/property/atom rho phase surface
 
@@ -83,5 +84,6 @@ neighbor           ${skin} bin
 neigh_modify       one 5000
 
 dump               1 all custom 200 atomDump id type x y vx vy fx fy c_1[*]
+dump               dmpvtk all vtk 10 dump/dump*.vtk id type x y z vx vy vz fx fy fz
 
 run                400000

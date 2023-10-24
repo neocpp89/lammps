@@ -55,11 +55,13 @@ FixRHEOStress::~FixRHEOStress()
 void FixRHEOStress::post_constructor()
 {
   id_fix = utils::strdup(std::string(id) + "_store");
-  store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM d_pxx d_pyy d_pzz d_pxy d_pxz d_pyz", id_fix, group->names[igroup])));
+  // store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM d_pxx d_pyy d_pzz d_pxy d_pxz d_pyz", id_fix, group->names[igroup])));
+  store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM 6 0 1 1", id_fix, group->names[igroup])));
   array_atom = store_fix->astore;
 
   id_compute = utils::strdup(std::string(id) + "_compute");
-  stress_compute = modify->add_compute(fmt::format("{} {} stress/atom NULL ke pair bond", id_compute, group->names[igroup]));
+  // stress_compute = modify->add_compute(fmt::format("{} {} stress/atom NULL ke pair bond", id_compute, group->names[igroup]));
+  stress_compute = modify->add_compute(fmt::format("{} {} RHEO/STRESS", id_compute, group->names[igroup]));
 }
 
 /* ---------------------------------------------------------------------- */
