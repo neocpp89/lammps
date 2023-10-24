@@ -59,6 +59,8 @@ ComputeRHEOKernel::ComputeRHEOKernel(LAMMPS *lmp, int narg, char **arg) :
 
   if (kernel_style == QUINTIC || kernel_style == WENDLANDC4) {
     correction_order = -1;
+  } else if (kernel_style == CUBIC) {
+    correction_order = -1;
   } else if (kernel_style == RK0) {
     correction_order = 0;
   } else if (kernel_style == RK1) {
@@ -116,9 +118,15 @@ void ComputeRHEOKernel::init()
     if (dim == 3) {
       pre_w = 1.0 / (120.0 * MY_PI) * 27.0 * cutsqinv * cutinv;
       pre_wp = pre_w * 3.0 * cutinv;
+      // want influence to be over size 'h' (instead of 2h by kernel
+      // formulation), so we need to scale.
+      const double h = cut;
+      alpha_d = (3.0 / (2.0 * M_PI * h * h * h)) * 8.0;
     } else {
       pre_w = 7.0 / (478.0 * MY_PI) * 9 * cutsqinv;
       pre_wp = pre_w * 3.0 * cutinv;
+      const double h = cut;
+      alpha_d = (15.0 / (7.0 * M_PI * h * h)) * 4.0;
     }
   } else {
     if (dim == 3) {
@@ -186,6 +194,8 @@ double ComputeRHEOKernel::calc_w(int i, int j, double delx, double dely, double 
     return calc_w_wendlandc4(r);
   if (kernel_style == QUINTIC)
     return calc_w_quintic(r);
+  if (kernel_style == CUBIC)
+    return calc_w_cubic(i,j,delx,dely,delz,r);
 
   double w = 0.0;
   int corrections_i = check_corrections(i);
@@ -216,6 +226,8 @@ double ComputeRHEOKernel::calc_dw(int i, int j, double delx, double dely, double
     return calc_dw_quintic(delx, dely, delz, r, dWij, dWji);
   if (kernel_style == RK0)
     return calc_dw_quintic(delx, dely, delz, r, dWij, dWji);
+  if (kernel_style == CUBIC)
+    return calc_dw_cubic(i,j,delx,dely,delz,r,dWij,dWji);
 
   double wp;
   int corrections_i = check_corrections(i);
@@ -234,6 +246,62 @@ double ComputeRHEOKernel::calc_dw(int i, int j, double delx, double dely, double
     if (corrections_i) calc_dw_rk2(i, dxij, r, dWij);
     if (corrections_j) calc_dw_rk2(j, dxji, r, dWji);
   }
+
+  return wp;
+}
+
+/* ---------------------------------------------------------------------- */
+
+double ComputeRHEOKernel::calc_w_cubic(int i, int j, double delx, double dely, double delz, double r)
+{
+  double w, tmp1, tmp2, tmp3, tmp1sq, tmp2sq, tmp3sq, s;
+  s = r * 2.0 * cutinv;
+
+	if (s > 2.0) {
+	  w = 0.0;
+	} else if (s <= 2.0) {
+      w = (2.0 - s);
+      w = (w * w * w) / 6.0;
+	} else if (s <= 1.0) {
+      w = (2.0 / 3.0) - (s * s) + ((s * s * s) / 2.0);
+	}
+
+  w *= alpha_d;
+
+  Wij = w;
+  Wji = w;
+
+  return w;
+}
+
+/* ---------------------------------------------------------------------- */
+
+double ComputeRHEOKernel::calc_dw_cubic(int i, int j, double delx, double dely, double delz, double r, double *dW1, double *dW2)
+{
+  double wp, tmp1, tmp2, tmp3, tmp1sq, tmp2sq, tmp3sq, s, wprinv;
+  double *mass = atom->mass;
+  int *type = atom->type;
+
+  s = r * 2.0 * cutinv;
+
+  if (s > 2.0) {
+    wp = 0.0;
+  } else if (s <= 2.0) {
+    wp = (2.0 - s);
+    wp = -(wp * wp) / 2.0;
+  } else if (s <= 1.0) {
+    wp = -(2.0 * s) + (3.0 / 2.0) * (s * s);
+  }
+
+  wp *= alpha_d;
+  wprinv = wp / (r * cut);
+  dW1[0] = delx * wprinv;
+  dW1[1] = dely * wprinv;
+  dW1[2] = delz * wprinv;
+
+  dW2[0] = -delx * wprinv;
+  dW2[1] = -dely * wprinv;
+  dW2[2] = -delz * wprinv;
 
   return wp;
 }

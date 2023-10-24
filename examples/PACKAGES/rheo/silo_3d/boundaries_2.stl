@@ -1,0 +1,23 @@
+solid sachithtest
+facet normal 0 1 0
+    outer loop
+        vertex -40 -6 -40
+        vertex 40 -6 -40
+        vertex 40 -6 40
+    endloop
+endfacet
+facet normal 0 1 0
+    outer loop
+        vertex -40 -6 -40
+        vertex 40 -6 40
+        vertex -40 -6 40
+    endloop
+endfacet
+facet normal 0 1 0
+    outer loop
+        vertex -3 -0.3 -3
+        vertex 3 -0.3 3
+        vertex -3 -0.3 3
+    endloop
+endfacet
+endsolid sachithtest

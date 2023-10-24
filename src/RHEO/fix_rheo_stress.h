@@ -11,38 +11,40 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#ifdef COMPUTE_CLASS
+#ifdef FIX_CLASS
 // clang-format off
-ComputeStyle(rattlers/atom,ComputeRattlersAtom);
+FixStyle(rheo/stress,FixRHEOStress);
 // clang-format on
 #else
 
-#ifndef LMP_COMPUTE_RATTLERS_ATOM_H
-#define LMP_COMPUTE_RATTLERS_ATOM_H
+#ifndef LMP_FIX_RHEO_STRESS_H
+#define LMP_FIX_RHEO_STRESS_H
 
-#include "compute.h"
+#include "fix.h"
+#include "compute_rheo_stress.h"
 
 namespace LAMMPS_NS {
 
-class ComputeRattlersAtom : public Compute {
+class FixRHEOStress : public Fix {
  public:
-  ComputeRattlersAtom(class LAMMPS *, int, char **);
-  ~ComputeRattlersAtom() override;
+  FixRHEOStress(class LAMMPS *, int, char **);
+  ~FixRHEOStress() override;
+  void post_constructor() override;
+  int setmask() override;
   void init() override;
-  void init_list(int, class NeighList *) override;
-  void compute_peratom() override;
-  double compute_scalar() override;
+  void pre_force(int) override;
+  void end_of_step() override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
-  int pack_reverse_comm(int, int, double *) override;
-  void unpack_reverse_comm(int, int *, double *) override;
+
+  // Hack so I can set fix_rheo in this later
+  class Compute *stress_compute;
 
  private:
-  int cutstyle, ncontacts_rattler, max_tries, nmax, invoked_peratom;
-  int *ncontacts;
-  double *rattler;
-  class NeighList *list;
-
+  char *id_compute, *id_fix;
+  // class Compute *stress_compute;
+  class FixStoreAtom *store_fix;
+  std::string property_list_for_compute;
 };
 
 }    // namespace LAMMPS_NS

@@ -25,15 +25,22 @@
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_rho_sum.h"
 #include "compute_rheo_surface.h"
+#include "fix_rheo_stress.h"
+#include "compute_rheo_stress.h"
 #include "compute_rheo_vshift.h"
 #include "domain.h"
 #include "error.h"
 #include "force.h"
 #include "memory.h"
 #include "modify.h"
+#include "region.h"
 #include "update.h"
 
 #include <cstring>
+
+#include <cfloat>
+#include <cassert>
+#include <cstdlib>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
@@ -53,12 +60,64 @@ static const char cite_rheo[] =
     " author = {Palermo, Eric T. and Wolf, Ki T. and Clemmer, Joel T. and O'Connor, Thomas C.},\n"
     "}\n\n";
 
+// #define SD_PRINTF(args...) printf(args);
+#define SD_PRINTF(args...)
+
+#define DIM(x) (sizeof(x) / sizeof(x[0]))
+
+typedef struct {
+    double x;
+    double y;
+    double z;
+} vector_3d_t;
+
+typedef struct {
+    vector_3d_t normal;
+    vector_3d_t a;
+    vector_3d_t b;
+    vector_3d_t c;
+    bool sticky;
+    double thickness;
+    double mu;
+} stl_facet_t;
+
+static size_t num_loaded_facets = 0;
+static double boundary_thickness = 0.01;
+static uint64_t sticky_bitmask = 0;
+
+struct boundary_args {
+    const char *filepath;
+    // stl_facet_t *loaded_facets;
+    // size_t num_loaded_facets;
+    double thickness;
+    double mu;
+    bool double_sided;
+    bool sticky;
+};
+
+static std::vector<struct boundary_args> boundary_args;
+static size_t num_boundary_files_with_args = 0;
+
+static void cross(vector_3d_t * const result,
+                  const vector_3d_t * const a,
+                  const vector_3d_t * const b);
+static void vsub(vector_3d_t * const result,
+                 const vector_3d_t * const a,
+                 const vector_3d_t * const b);
+static void normalize(vector_3d_t *v);
+static void print_facet(const stl_facet_t * const facet);
+static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp);
+static bool parse_stl_with_args(stl_facet_t *facets, size_t *num_facets, const struct boundary_args * const args);
+
+static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet);
+
 /* ---------------------------------------------------------------------- */
 
 FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), rho0(nullptr), csq(nullptr), shift_type(nullptr),
     compute_grad(nullptr), compute_kernel(nullptr), compute_interface(nullptr),
-    compute_surface(nullptr), compute_rhosum(nullptr), compute_vshift(nullptr)
+    compute_surface(nullptr), compute_rhosum(nullptr), compute_vshift(nullptr),
+    boundary_region_ids(), boundary_regions(), nc()
 {
   time_integrate = 1;
 
@@ -79,6 +138,12 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
 
   int i, nlo, nhi;
   int n = atom->ntypes;
+  size_t max_stl_facets = 65536;
+  for (auto && entry : boundary_args) {
+    entry.thickness = boundary_thickness;
+  }
+
+  struct boundary_args * boundary_arg = NULL;
   memory->create(rho0, n + 1, "rheo:rho0");
   memory->create(csq, n + 1, "rheo:csq");
   for (i = 1; i <= n; i++) {
@@ -101,6 +166,8 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   cut = utils::numeric(FLERR, arg[3], false, lmp);
   if (strcmp(arg[4], "quintic") == 0) {
     kernel_style = QUINTIC;
+  } else if (strcmp(arg[4],"cubic") == 0) {
+    kernel_style = CUBIC;
   } else if (strcmp(arg[4], "wendland/c4") == 0) {
     kernel_style = WENDLANDC4;
   } else if (strcmp(arg[4], "RK0") == 0) {
@@ -173,6 +240,32 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         if (rho0[i] <= 0.0) error->all(FLERR, "The equilibrium density must be greater than zero");
       }
       iarg += n;
+    } else if (strcmp(arg[iarg], "boundary/rampthickness") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal ramp thickness option in fix rheo");
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->thickness  = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/stlmaxfacets") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal number of max stl facets.");
+      // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      max_stl_facets = strtoull(arg[iarg + 1], NULL, 0);
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/stickybitmask") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal sticky bc option in fix rheo");
+      // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      sticky_bitmask = strtoull(arg[iarg + 1], NULL, 0);
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/doublesided") == 0) {
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->double_sided = true;
+    } else if (strcmp(arg[iarg], "boundary/sticky") == 0) {
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->sticky = true;
+    } else if (strcmp(arg[iarg], "boundary/mu") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal boundary mu (friction) option in fix rheo");
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->mu = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 1;
     } else if (strcmp(arg[iarg], "speed/sound") == 0) {
       if (iarg + n >= narg) utils::missing_cmd_args(FLERR, "fix rheo speed/sound", error);
       for (i = 1; i <= n; i++) {
@@ -180,6 +273,12 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         csq[i] *= csq[i];
       }
       iarg += n;
+    } else if (strcmp(arg[iarg],"boundary/region") == 0) {
+      if (narg < iarg+2) error->all(FLERR,"Illegal region command");
+      boundary_region_ids.push_back(utils::strdup(arg[iarg+1]));
+      boundary_args.push_back({});
+      boundary_arg = &boundary_args[boundary_args.size()-1];
+      iarg += 1;
     } else {
       error->all(FLERR, "Illegal fix rheo command: {}", arg[iarg]);
     }
@@ -187,6 +286,16 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   }
 
   if (lmp->citeme) lmp->citeme->add(cite_rheo);
+
+  for (auto boundary_region_id : boundary_region_ids) {
+      if (boundary_region_id.length() > 0)
+      {
+          auto boundary_region = domain->get_region_by_id(boundary_region_id);
+          if (!boundary_region) error->all(FLERR, "Region {} for fix rheo does not exist", boundary_region_id);
+          boundary_regions.push_back(boundary_region);
+          nc.push_back(0);
+      }
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -253,6 +362,7 @@ int FixRHEO::setmask()
   mask |= INITIAL_INTEGRATE;
   mask |= FINAL_INTEGRATE;
   mask |= PRE_FORCE;
+  mask |= POST_FORCE;
   return mask;
 }
 
@@ -307,6 +417,9 @@ void FixRHEO::setup_pre_force(int /*vflag*/)
 
 /* ---------------------------------------------------------------------- */
 
+static void bc_setup(void);
+static double clamp_unity(double v);
+
 void FixRHEO::setup(int /*vflag*/)
 {
   // Confirm all accessory fixes are defined
@@ -324,11 +437,679 @@ void FixRHEO::setup(int /*vflag*/)
   oxidation_fix_defined = 0;
 
   if (rhosum_flag) compute_rhosum->compute_peratom();
+
+  bc_setup();
 }
 
 /* ---------------------------------------------------------------------- */
 
-void FixRHEO::initial_integrate(int /*vflag*/)
+
+// Normal points leftward along path (xl, yl) to (xr, yr).
+typedef struct {
+    double xl;
+    double yl;
+    double xr;
+    double yr;
+    double ramp_thickness;
+    double dead_thickness;
+    double mu;
+} sd_boundary_t;
+
+// Normal formed from r1 x r2. ramp_thickness is along positive normal and
+// dead_thickness is along negative normal. r1 and r2 are HALF of the distance
+// in each dimension of the bounding rectangular prism.
+typedef struct {
+    vector_3d_t origin;
+    vector_3d_t r1;
+    vector_3d_t r2;
+
+    double ramp_thickness;
+    double dead_thickness;
+    double mu;
+
+    // computed
+    double r1_mag;
+    double r2_mag;
+    vector_3d_t n1;
+    vector_3d_t n2;
+    vector_3d_t n3;
+} sd_boundary_3d_t;
+
+static double dot(const vector_3d_t * const a, const vector_3d_t * const b)
+{
+    return (a->x * b->x) + (a->y * b->y) + (a->z * b->z);
+}
+
+static double magnitude_squared(const vector_3d_t * const v)
+{
+    return dot(v, v);
+}
+
+static void normalize(vector_3d_t *v)
+{
+    const double d = sqrt(magnitude_squared(v));
+    v->x /= d;
+    v->y /= d;
+    v->z /= d;
+}
+
+static void cross(vector_3d_t * const result,
+                  const vector_3d_t * const a,
+                  const vector_3d_t * const b)
+{
+    result->x =  ((a->y * b->z) - (a->z * b->y));
+    result->y = -((a->x * b->z) - (a->z * b->x));
+    result->z =  ((a->x * b->y) - (a->y * b->x));
+}
+
+static void vsub(vector_3d_t * const result,
+                 const vector_3d_t * const a,
+                 const vector_3d_t * const b)
+{
+    result->x = a->x - b->x;
+    result->y = a->y - b->y;
+    result->z = a->z - b->z;
+}
+
+static vector_3d_t compute_normal(const vector_3d_t * const r1, const vector_3d_t * const r2)
+{
+    vector_3d_t n = {
+        .x =  ((r1->y * r2->z) - (r1->z * r2->y)),
+        .y = -((r1->x * r2->z) - (r1->z * r2->x)),
+        .z =  ((r1->x * r2->y) - (r1->y * r2->x)),
+    };
+
+    // Actually normalize the normal too...
+    normalize(&n);
+
+    return n;
+}
+
+// This function will only work if p is in the plane given by a, b, c. This
+// should be okay since we'll use the boundary layer check first to get the
+// distance, which can use to project down into this plane outside this
+// function.
+static bool is_projected_point_in_triangle_3d(const vector_3d_t * const p,
+                                              const vector_3d_t * const a,
+                                              const vector_3d_t * const b,
+                                              const vector_3d_t * const c)
+{
+    // vectors from P to x.
+    vector_3d_t v_pa = {0};
+    vector_3d_t v_pb = {0};
+    vector_3d_t v_pc = {0};
+    vsub(&v_pa, a, p);
+    vsub(&v_pb, b, p);
+    vsub(&v_pc, c, p);
+
+    // cross products for various sub triangles to get normals
+    vector_3d_t s_ab = {0};
+    vector_3d_t s_bc = {0};
+    vector_3d_t s_ca = {0};
+    cross(&s_ab, &v_pa, &v_pb);
+    cross(&s_bc, &v_pb, &v_pc);
+    cross(&s_ca, &v_pc, &v_pa);
+
+    const bool s1 = dot(&s_ab, &s_bc) > 0;
+    const bool s2 = dot(&s_ca, &s_bc) > 0;
+    return (s1 && s2);
+}
+
+static const double dead_thickness = 0.1;
+
+static const sd_boundary_t boundaries[] = {
+    // bottom wall
+    // {-3.0, -10.0, 3.0, -10.0, boundary_thickness, dead_thickness, 1.0},
+    {-20.0, -6.0, 20.0, -6.0, boundary_thickness, dead_thickness, 1.0},
+
+    // silo orifice walls
+    // {-3.0, 0.0, -1.0, 0.0, boundary_thickness, dead_thickness, 1.0},
+    // {1.0, 0.0, 3.0, 0.0, boundary_thickness, dead_thickness, 1.0},
+    {-3.0, 0.0, -1.0, -1.0, boundary_thickness, dead_thickness, 1.0},
+    {1.0, -1.0, 3.0, 0.0, boundary_thickness, dead_thickness, 1.0},
+
+    // outer walls
+    // {-3.0, 3.0, -3.0, -10.0, boundary_thickness, dead_thickness, 0.0},
+    // {3.0, -10.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
+    {-3.0, 3.0, -3.0, 0.0, boundary_thickness, dead_thickness, 0.0},
+    {3.0, 0.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
+};
+
+static const double scale = 1.001;
+
+static sd_boundary_3d_t b3[] = {
+    // 4 angled hopper plates
+    {
+        .origin = {0.0, -1.0, 2.0},
+        .r1 = {-3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, 1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, 3.0},
+        .r2 = {1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {0.0, -1.0, -2.0},
+        .r1 = {3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, -1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {-2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, -3.0},
+        .r2 = {-1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+
+    // 4 sidewalls
+    {
+        .origin = {0.0, 1.5, 3.0},
+        .r1 = {-3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {3.0, 1.5, 0.0},
+        .r1 = {0.0, 0.0, 3.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {0.0, 1.5, -3.0},
+        .r1 = {3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {-3.0, 1.5, 0.0},
+        .r1 = {0.0, 0.0, -3.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    // bottom collector
+    {
+        .origin = {0.0, -6.0, 0.0},
+        // .origin = {0.0, -0.0, 0.0},
+        .r1 = {40.0, 0.0, 0.0},
+        .r2 = {0.0, 0.0, -40.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 1.0,
+    },
+};
+
+enum stl_parser_expect_states {
+    EXPECT_HEADER,
+    EXPECT_FACET,
+    EXPECT_LOOP,
+    EXPECT_VERTEX,
+    EXPECT_ENDLOOP,
+    EXPECT_ENDFACET,
+    AT_CAPACITY,
+};
+
+static void parse_vector_3d(vector_3d_t *v, const char *s)
+{
+    assert(v != NULL);
+    assert(s != NULL);
+
+    const char *delim = " \t";
+    size_t component = 0;
+    char s_copy[1024] = {0};
+    strncpy(s_copy, s, sizeof(s_copy));
+    char *tok = strtok(s_copy, delim);
+    while (tok != NULL) {
+        if (component < 3) {
+            double value = 0;
+            int result = sscanf(tok, "%lg", &value);
+            assert(result == 1);
+            switch(component) {
+                case 0: v->x = value; break;
+                case 1: v->y = value; break;
+                case 2: v->z = value; break;
+            }
+        }
+        component++;
+        tok = strtok(NULL, delim);
+    }
+}
+
+static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp)
+{
+    assert(facets != NULL);
+    assert(num_facets != NULL);
+    assert(fp != NULL);
+
+    char line[256] = {0};
+    size_t vertex_number = 0;
+
+    const size_t capacity = *num_facets;
+    *num_facets = 0;
+
+    enum stl_parser_expect_states state = EXPECT_HEADER;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        printf("LINE: %s", line);
+        printf("STATE: %d\n", state);
+        stl_facet_t * const entry = &facets[*num_facets];
+        switch (state) {
+            case EXPECT_HEADER: {
+                if (strncmp(line, "solid", 5) == 0) {
+                    state = EXPECT_FACET;
+                }
+            } break;
+            case EXPECT_FACET: {
+                if (strncmp(line, "facet normal ", 13) == 0) {
+                    char *nx_start = &line[13];
+                    parse_vector_3d(&entry->normal, nx_start);
+                    state = EXPECT_LOOP;
+                }
+            } break;
+            case EXPECT_LOOP: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "outer loop", 10) == 0) {
+                    vertex_number = 0;
+                    state = EXPECT_VERTEX;
+                }
+            } break;
+            case EXPECT_VERTEX: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "vertex ", 7) == 0) {
+                    vector_3d_t v = {0};
+                    parse_vector_3d(&v, &line[skip+7]);
+                    switch (vertex_number) {
+                        case 0: entry->a = v; break;
+                        case 1: entry->b = v; break;
+                        case 2: entry->c = v; break;
+                    };
+                    vertex_number++;
+
+                    if (vertex_number >= 3) {
+                        state = EXPECT_ENDLOOP;
+                    }
+                }
+            } break;
+            case EXPECT_ENDLOOP: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "endloop", 7) == 0) {
+                    state = EXPECT_ENDFACET;
+                }
+            } break;
+            case EXPECT_ENDFACET: {
+                if (strncmp(line, "endfacet", 8) == 0) {
+                    (*num_facets)++;
+                    if (*num_facets >= capacity) {
+                        state = AT_CAPACITY;
+                    } else {
+                        state = EXPECT_FACET;
+                    }
+                }
+            } break;
+            case AT_CAPACITY: break;
+        }
+        // TODO: Should check for an "endsolid" line...
+    }
+
+    return true;
+}
+
+
+static bool parse_stl_with_args(stl_facet_t *facets, size_t *num_facets, const struct boundary_args * const args)
+{
+  const size_t capacity = *num_facets;
+  FILE *boundary_fp = fopen(args->filepath, "r");
+  if (boundary_fp == NULL) {
+    return false;
+  } else {
+    bool success = parse_stl_file(facets, num_facets, boundary_fp);
+    fclose(boundary_fp);
+
+    if (!success) {
+      return false;
+    }
+
+    size_t local_num_loaded_facets = *num_facets;
+    if (args->double_sided) {
+        if ((2 * local_num_loaded_facets) < capacity) {
+            printf("double sided boundary\n");
+            for (size_t i = 0; i < local_num_loaded_facets; ++i) {
+                stl_facet_t * const entry = &facets[i];
+                stl_facet_t * const mirror_entry = &facets[i + local_num_loaded_facets];
+                *mirror_entry = *entry;
+                vector_3d_t tmp = mirror_entry->b;
+                mirror_entry->b = mirror_entry->a;
+                mirror_entry->a = tmp;
+                mirror_entry->normal.x = -mirror_entry->normal.x;
+                mirror_entry->normal.y = -mirror_entry->normal.y;
+                mirror_entry->normal.z = -mirror_entry->normal.z;
+            }
+            local_num_loaded_facets *= 2;
+        }
+    }
+
+    for (size_t i = 0; i < local_num_loaded_facets; ++i) {
+        stl_facet_t * const entry = &facets[i];
+        entry->sticky = args->sticky;
+        entry->thickness = args->thickness;
+        entry->mu = args->mu;
+
+        // If all three normal components are 0, assume that we're supposed
+        // to take the three vertices in increasing angle (counter
+        // clockwise) and compute the normal from those.
+        if (entry->normal.x == 0.0 &&
+            entry->normal.y == 0.0 &&
+            entry->normal.z == 0.0) {
+            // vectors from P to x.
+            vector_3d_t v_ab = {0};
+            vector_3d_t v_ac = {0};
+            vsub(&v_ab, &entry->b, &entry->a);
+            vsub(&v_ac, &entry->c, &entry->a);
+
+            // will actual normalize in next step.
+            vector_3d_t s = {0};
+            cross(&s, &v_ab, &v_ac);
+            entry->normal = s;
+        }
+        normalize(&entry->normal);
+
+        // printf("facet %zu:\n", i);
+        // print_facet(entry);
+    }
+
+    *num_facets = local_num_loaded_facets;
+    return true;
+  }
+  return false;
+}
+
+static void print_vector(const vector_3d_t * const v)
+{
+    printf("{%.17g, %.17g, %.17g}\n", v->x, v->y, v->z);
+}
+
+static void print_facet(const stl_facet_t * const facet)
+{
+    printf("  normal = ");
+    print_vector(&facet->normal);
+    printf("  a = ");
+    print_vector(&facet->a);
+    printf("  b = ");
+    print_vector(&facet->b);
+    printf("  c = ");
+    print_vector(&facet->c);
+    printf("  sticky = %s\n", facet->sticky ? "yes" : "no");
+    printf("  thickness = %g\n", facet->thickness);
+}
+
+static void update_triangle_list(uint64_t **list, uint64_t index_to_add)
+{
+    if (*list == NULL) {
+        *list = static_cast<uint64_t *>(calloc(2, sizeof(*list[0])));
+        assert(*list != NULL);
+        // first element is number of entries that follow.
+        (*list)[0] = 1;
+        (*list)[1] = index_to_add;
+    } else {
+        assert(*list != NULL);
+        const size_t capacity = (*list)[0];
+
+        uint64_t *new_list = static_cast<uint64_t *>(calloc(capacity + 2, sizeof(*list[0])));
+        assert(new_list != NULL);
+
+        new_list[0] = capacity + 1;
+        for (size_t i = 0; i < capacity; ++i) {
+            new_list[i + 1] = (*list)[i + 1];
+        }
+        new_list[capacity + 1] = index_to_add;
+        free(*list);
+        *list = new_list;
+    }
+}
+
+
+// See https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0811r2.html
+static double stable_lerp(double a, double b, double t)
+{
+  // Exact, monotonic, bounded, determinate, and (for a=b=0) consistent:
+  if(a<=0 && b>=0 || a>=0 && b<=0) return t*b + (1.0-t)*a;
+
+  if(t==1.0) return b;                        // exact
+  // Exact at t=0, monotonic except near t=1,
+  // bounded, determinate, and consistent:
+  const double x = a + t*(b-a);
+  return t>1.0 == b>a ? std::max(b,x) : std::min(b,x);  // monotonic near t=1
+}
+
+static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const vector_3d_t * const xp, double *mu_wall,
+        const std::vector<Region *> &region_list,
+        const std::vector<struct boundary_args> &boundary_arg_list,
+        std::vector<int> &nc,
+        vector_3d_t *vw,
+        double *out_r,
+        double *out_boundary_thickness
+    // Region *boundary_region
+)
+{
+    *sdf = 0.0;
+    *normal = (vector_3d_t) {
+        0.0,
+        0.0,
+        0.0,
+    };
+
+    // FIXME: For some reason, this scheme does not work with regions that are
+    // unions. I need to investigate, because I usually forget this when making
+    // complex shapes and then the simulation does not look correct at all.
+
+    // Do first to get all contacts in all regions.
+    for (size_t ii = 0; ii < region_list.size(); ++ii) {
+        auto region = region_list[ii];
+        const auto & args = boundary_arg_list[ii];
+        if (region->match(xp->x, xp->y, xp->z)) {
+            nc[ii] = region->surface(xp->x, xp->y, xp->z, args.thickness);
+        } else {
+            nc[ii] = 0;
+        }
+    }
+
+    double min_r = DBL_MAX;
+
+    for (size_t ii = 0; ii < region_list.size(); ++ii) {
+        auto region = region_list[ii];
+        const auto & args = boundary_arg_list[ii];
+        if (nc[ii] > 0) {
+            for (size_t i = 0; i < nc[ii]; ++i) {
+                double xp_array[3] = { xp->x, xp->y, xp->z };
+                if (region->contact[i].r > 0.0) {
+                    double my_strength = 1.0;
+                    const vector_3d_t my_normal = {
+                        .x = region->contact[i].delx / region->contact[i].r,
+                        .y = region->contact[i].dely / region->contact[i].r,
+                        .z = region->contact[i].delz / region->contact[i].r,
+                    };
+
+                    // Now we need to go over all other contacts, including in
+                    // other regions.
+                    for (size_t jj = 0; jj < region_list.size(); ++jj) {
+                        auto other_region = region_list[jj];
+                        const auto & other_args = boundary_arg_list[jj];
+                        for (size_t j = 0; j < nc[jj]; ++j) {
+                            // Not the current wall we're considering (chain rule), and
+                            // product of all other walls that are within range.
+                            const bool is_current_contact = (ii == jj) && (i == j);
+
+                            if (!is_current_contact && (other_region->contact[j].r < other_args.thickness)) {
+                                my_strength *= other_region->contact[j].r;
+                            }
+                        }
+                    }
+
+                    normal->x += my_strength * my_normal.x;
+                    normal->y += my_strength * my_normal.y;
+                    normal->z += my_strength * my_normal.z;
+
+                    const double r = region->contact[i].r / args.thickness;
+                    const double s = clamp_unity((1.0 - r) / 0.9);
+                    // printf("i = %zu, s = %g, nhat = (%g, %g, %g)\n", i, s, my_normal.x, my_normal.y, my_normal.z);
+
+                    // rethink how this should be done with mixing.
+
+                    // UNCOMMENT TO USE NORMALIZES STRENGTH AS DISCRIMINATOR
+                    // *sdf = std::max(s, *sdf);
+                    // if (s == *sdf) {
+
+                    min_r = std::min(r, min_r);
+                    if (r == min_r) {
+                        *sdf = s;
+                        *facet_index = ii * 1000 + i;
+                        *mu_wall = args.mu;
+
+                        // Uncomment to make "largest (normalized) force wins"
+                        // N.B. Shouldn't we actually do largest dimensioned force wins??
+                        *normal = my_normal;
+
+                        *out_r = r;
+                        *out_boundary_thickness = args.thickness;
+
+                        double vwall[3] = {0};
+                        region->velocity_contact(vwall, xp_array, i);
+                        if ((vwall[0] != 0.0) ||
+                            (vwall[1] != 0.0) ||
+                            (vwall[2] != 0.0)) {
+                            // printf("vwall = %.17g %.17g %.17g\n",
+                            //     vwall[0],
+                            //     vwall[1],
+                            //     vwall[2]
+                            // );
+                            vw->x = vwall[0];
+                            vw->y = vwall[1];
+                            vw->z = vwall[2];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (*sdf > 0.0) {
+        normalize(normal);
+    }
+}
+
+static void bc_setup(void)
+{
+}
+
+static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet)
+{
+    // set outputs
+    *distance = DBL_MAX;
+
+    const vector_3d_t v = {
+        .x = xp->x - facet->a.x,
+        .y = xp->y - facet->a.y,
+        .z = xp->z - facet->a.z,
+    };
+
+    const double x3 = dot(&v, &facet->normal);
+    if (0.0 <= x3 && x3 <= 5.0 * facet->thickness) {
+        const vector_3d_t p = {
+            .x = xp->x - (x3 * facet->normal.x),
+            .y = xp->y - (x3 * facet->normal.y),
+            .z = xp->z - (x3 * facet->normal.z),
+        };
+        if (is_projected_point_in_triangle_3d(&p, &facet->a, &facet->b, &facet->c)) {
+            // const double x3 = dot(&v, &facet->normal);
+            *distance = x3;
+        }
+    }
+
+}
+
+static void b3_distance(double *distance, const vector_3d_t * const xp, const sd_boundary_3d_t * const boundary)
+{
+    // set outputs
+    *distance = DBL_MAX;
+
+    const vector_3d_t v = {
+        .x = xp->x - boundary->origin.x,
+        .y = xp->y - boundary->origin.y,
+        .z = xp->z - boundary->origin.z,
+    };
+
+    const double x1 = dot(&v, &boundary->n1);
+    if (-boundary->r1_mag <= x1 && x1 <= boundary->r1_mag) {
+        const double x2 = dot(&v, &boundary->n2);
+        if (-boundary->r2_mag <= x2 && x2 <= boundary->r2_mag) {
+            const double x3 = dot(&v, &boundary->n3);
+            *distance = x3;
+        }
+    }
+}
+
+static void clear_wall_bitset(uint64_t *wall_bitset)
+{
+    *wall_bitset = 0;
+}
+
+static bool is_wall_close(uint64_t wall_bitset, size_t wall_index)
+{
+    return ((wall_bitset & (UINT64_C(1) << wall_index)) != 0);
+}
+
+static void set_wall_bitset(uint64_t *wall_bitset, size_t wall_index)
+{
+    *wall_bitset |= (UINT64_C(1) << wall_index);
+}
+
+static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
+{
+    const double dx = boundary->xr - boundary->xl;
+    const double dy = boundary->yr - boundary->yl;
+    const double r = hypot(dx, dy);
+    *xn = -dy / r;
+    *yn = dx / r;
+}
+
+static double clamp_unity(double v)
+{
+    if (v < 0.0) {
+        return 0.0;
+    } else if (v > 1.0) {
+        return 1.0;
+    } else {
+        return v;
+    }
+}
+
+void FixRHEO::post_force(int /*vflag*/)
 {
   // update v, x and rho of atoms in group
   int i, a, b;
@@ -353,6 +1134,283 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
 
+  auto fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
+  auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
+  double **stress = stress_compute->array_atom;
+
+
+  for (auto region: boundary_regions) {
+    // auto region = boundary_region;
+    // printf("Region: %p\n", region);
+    // printf("%s\n", region->id);
+
+      int regiondynamic = region->dynamic_check();
+
+      // set current motion attributes of region
+      // set_velocity() also updates prev to current step
+
+      if (regiondynamic) {
+        region->prematch();
+        region->set_velocity();
+      }
+  }
+
+  // hack for BCS
+  // [sdunatunga] Tue 13 Feb 2024 07:53:19 AM PST
+  for (i = 0; i < nlocal; i++) {
+    if (status[i] & STATUS_NO_INTEGRATION) continue;
+
+    if (mask[i] & groupbit) {
+      if (rmass_flag) {
+        dtfm = dtf / rmass[i];
+      } else {
+        dtfm = dtf / mass[type[i]];
+      }
+
+        // Uncomment to make the wall reflect particles instead of placing them
+        // exactly at the edge.
+        // const double ftest[] = {
+        //     -2.0 * v[i][0] / dtfm,
+        //     -2.0 * v[i][1] / dtfm,
+        //     -2.0 * v[i][2] / dtfm,
+        // };
+
+        // OLD FTEST, sets velocity to zero at boundary exactly (has an issue with curvature)
+        // const double ftest[] = {
+        //     -v[i][0] / dtfm,
+        //     -v[i][1] / dtfm,
+        //     -v[i][2] / dtfm,
+        // };
+
+        const vector_3d_t xp = {
+            .x = x[i][0],
+            .y = x[i][1],
+            .z = x[i][2],
+        };
+
+        stress[i][29] = hypot(xp.x, xp.y);
+
+        vector_3d_t fdir = {
+            0.0,
+            0.0,
+            0.0,
+        };
+
+        double s = 0.0;
+        bool is_any_wall_sticky = false;
+        uint64_t walls_bitset = 0;
+        size_t facet_index = 0;
+        double mu_wall = 0.0;
+        vector_3d_t vwall = {0};
+
+        double r = 0.0;
+        double th = 0.0;
+        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc, &vwall, &r, &th);
+
+        // Modified ftest to place particle at exactly the boundary region away
+        // from the surface.
+        // (void) r;
+        // (void) th;
+        const double dtfm2 = 2.0 * dtfm;
+        // This is the "100 percent zone", and the edge of where we want to put
+        // the particle back to at the end of the step, in units of the wall
+        // thickness (i.e. 0.1 => 10 percent of the thickness is used as the
+        // 100% zone).
+        const double skin_distance_ratio = 0.1;
+        const double rr = th * (skin_distance_ratio - r);
+        const double sr = (rr > 0.0) ? th : 0.0;
+        const double rdt = sr / update->dt;
+        const double ftest[] = {
+            ((rdt * fdir.x) - v[i][0]) / dtfm2,
+            ((rdt * fdir.y) - v[i][1]) / dtfm2,
+            ((rdt * fdir.z) - v[i][2]) / dtfm2,
+        };
+
+        // Force full strength if within the skin distance.
+        if (sr > 0.0) {
+            s = 1.0;
+        }
+
+        // uint64_t walls_bitset = 0;
+        // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
+        // bool is_any_wall_sticky = false;
+        // for (size_t i = 0; i < num_loaded_facets; ++i) {
+        //     const stl_facet_t * const entry = &loaded_facets[i];
+        //     // Check if we are in contact with a sticky wall.
+        //     if (is_wall_close(walls_bitset, i)) {
+        //         is_any_wall_sticky |= entry->sticky;
+        //     }
+        // }
+
+        // [sdunatunga] Thu 03 Jul 2025 11:51:24 PM PDT
+        // Debug check for first contact step.
+        // update->ntimestep = 13320[Thread 0x7ffff0dcb640 (LWP 2811973) exited]
+        // if (s != 0.0) {
+        //     printf("update->ntimestep = %zu", (size_t)update->ntimestep);
+        //     exit(0);
+        // }
+
+        stress[i][12] = s;
+        stress[i][13] = xp.x;
+        stress[i][14] = xp.y;
+        stress[i][15] = xp.z;
+        stress[i][16] = facet_index;
+        // stress[i][16] = in_dead_zone;
+        stress[i][17] = walls_bitset;
+        stress[i][18] = ftest[0];
+        stress[i][19] = ftest[1];
+        stress[i][20] = ftest[2];
+        stress[i][21] = f[i][0];
+        stress[i][22] = f[i][1];
+        stress[i][23] = f[i][2];
+        stress[i][24] = fdir.x;
+        stress[i][25] = fdir.y;
+        // if (fdir.z != 0.0) {
+        //     printf("normal->z = %.9f\n", fdir.z);
+        // }
+        stress[i][26] = fdir.z;
+        if (s != 0.0) {
+            // We can slide along all walls in this contact, so we need a
+            // direction.
+            if (!is_any_wall_sticky) {
+                const vector_3d_t normal = fdir;
+
+                const vector_3d_t ft = {
+                    .x = f[i][0],
+                    .y = f[i][1],
+                    .z = f[i][2],
+                };
+
+                const vector_3d_t vt = {
+                    .x = v[i][0] - vwall.x,
+                    .y = v[i][1] - vwall.y,
+                    .z = v[i][2] - vwall.z,
+                };
+
+                const vector_3d_t vtr = {
+                    .x = vt.x + dtfm * ft.x,
+                    .y = vt.y + dtfm * ft.y,
+                    .z = vt.z + dtfm * ft.z,
+                };
+
+                const double vtrn = dot(&vtr, &normal);
+
+                vector_3d_t f_c = {
+                    .x = 0.0,
+                    .y = 0.0,
+                    .z = 0.0,
+                };
+
+                if (vtrn > 0.0) {
+                    // moving away from boundary, no contact forces.
+                } else {
+                    const double f_cn = -vtrn / dtfm;
+
+                    const vector_3d_t vtrtv = {
+                        .x = vtr.x - vtrn * normal.x,
+                        .y = vtr.y - vtrn * normal.y,
+                        .z = vtr.z - vtrn * normal.z,
+                    };
+
+                    const double vtrt = sqrt(magnitude_squared(&vtrtv));
+
+                    if (vtrt == 0.0) {
+                        // no relative tangential velocity, only normal forces
+                        f_c.x = f_cn * normal.x;
+                        f_c.y = f_cn * normal.y;
+                        f_c.z = f_cn * normal.z;
+                    } else {
+                        const double f_ct_max_wall = mu_wall * f_cn;
+                        const double f_ct_stick = vtrt / dtfm;
+                        const double f_ct = std::min(f_ct_stick, f_ct_max_wall);
+
+                        const vector_3d_t t_hat = {
+                            .x = vtrtv.x / vtrt,
+                            .y = vtrtv.y / vtrt,
+                            .z = vtrtv.z / vtrt,
+                        };
+
+                        // f_cn is in the same direction as the normal, but f_ct is
+                        // opposite to the velocity (how we defined t_hat).
+                        f_c.x = f_cn * normal.x - f_ct * t_hat.x;
+                        f_c.y = f_cn * normal.y - f_ct * t_hat.y;
+                        f_c.z = f_cn * normal.z - f_ct * t_hat.z;
+                    }
+                }
+
+                const double deltaf[] = {
+                    s * f_c.x,
+                    s * f_c.y,
+                    s * f_c.z,
+                };
+
+                f[i][0] = deltaf[0] + f[i][0];
+                f[i][1] = deltaf[1] + f[i][1];
+                f[i][2] = deltaf[2] + f[i][2];
+
+                stress[i][6] = deltaf[0];
+                stress[i][7] = deltaf[1];
+                stress[i][8] = deltaf[2];
+            } else {
+                const double deltaf[] = {
+                    s * (ftest[0] - f[i][0]),
+                    s * (ftest[1] - f[i][1]),
+                    s * (ftest[2] - f[i][2]),
+                };
+
+                f[i][0] = deltaf[0] + f[i][0];
+                f[i][1] = deltaf[1] + f[i][1];
+                f[i][2] = deltaf[2] + f[i][2];
+
+                stress[i][9] = deltaf[0];
+                stress[i][10] = deltaf[1];
+                stress[i][11] = deltaf[2];
+            }
+        }
+    }
+  }
+}
+
+void FixRHEO::initial_integrate(int /*vflag*/)
+{
+  // update v, x and rho of atoms in group
+  int i, a, b;
+  double dtfm, divu;
+
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int *status = atom->rheo_status;
+  double **x = atom->x;
+  double **v = atom->v;
+  double **f = atom->f;
+  double *rho = atom->rho;
+  double *drho = atom->drho;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  double **gradr = compute_grad->gradr;
+  double **gradv = compute_grad->gradv;
+  double **vshift;
+  if (shift_flag)
+    vshift = compute_vshift->vshift;
+
+  int nlocal = atom->nlocal;
+  int rmass_flag = atom->rmass_flag;
+  int dim = domain->dimension;
+
+  if (igroup == atom->firstgroup)
+    nlocal = atom->nfirst;
+
+  auto fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
+  auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
+  double **stress = stress_compute->array_atom;
+
+  // [sdunatunga] Tue 23 Apr 2024 12:10:17 AM PDT
+  // post_force contents used to be here
+
   //Density Half-step
   for (i = 0; i < nlocal; i++) {
     if (status[i] & STATUS_NO_INTEGRATION) continue;
@@ -367,15 +1425,19 @@ void FixRHEO::initial_integrate(int /*vflag*/)
       v[i][0] += dtfm * f[i][0];
       v[i][1] += dtfm * f[i][1];
       v[i][2] += dtfm * f[i][2];
+
+      if (atom->tag[i] == 1) {
+          SD_PRINTF("initial_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+      }
     }
   }
 
   // Update gradients and interpolate solid properties
   compute_grad->forward_fields();    // also forwards v and rho for chi
   if (interface_flag) {
-    // Need to save, wiped in exchange
-    compute_interface->store_forces();
-    compute_interface->compute_peratom();
+      // Need to save, wiped in exchange
+      compute_interface->store_forces();
+      compute_interface->compute_peratom();
   }
   compute_grad->compute_peratom();
 
@@ -388,16 +1450,16 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
   // Update density using div(u)
   if (!rhosum_flag) {
-    for (i = 0; i < nlocal; i++) {
-      if (mask[i] & groupbit) {
-        if (status[i] & STATUS_NO_INTEGRATION) continue;
-        if (status[i] & PHASECHECK) continue;
+      for (i = 0; i < nlocal; i++) {
+          if (mask[i] & groupbit) {
+              if (status[i] & STATUS_NO_INTEGRATION) continue;
+              if (status[i] & PHASECHECK) continue;
 
-        divu = 0;
-        for (a = 0; a < dim; a++) { divu += gradv[i][a * (1 + dim)]; }
-        rho[i] += dtf * (drho[i] - rho[i] * divu);
+          divu = 0;
+          for (a = 0; a < dim; a++) { divu += gradv[i][a * (1 + dim)]; }
+          rho[i] += dtf * (drho[i] - rho[i] * divu);
+        }
       }
-    }
   }
 
   // Shifting atoms
@@ -407,18 +1469,18 @@ void FixRHEO::initial_integrate(int /*vflag*/)
       if (status[i] & STATUS_NO_SHIFT) continue;
       if (status[i] & PHASECHECK) continue;
 
-      if (mask[i] & groupbit) {
-        for (a = 0; a < dim; a++) {
-          x[i][a] += dtv * vshift[i][a];
-          for (b = 0; b < dim; b++) { v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b]; }
-        }
+        if (mask[i] & groupbit) {
+          for (a = 0; a < dim; a++) {
+            x[i][a] += dtv * vshift[i][a];
+            for (b = 0; b < dim; b++) { v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b]; }
+          }
 
-        if (!rhosum_flag) {
-          if (status[i] & PHASECHECK) continue;
-          for (a = 0; a < dim; a++) { rho[i] += dtv * vshift[i][a] * gradr[i][a]; }
+          if (!rhosum_flag) {
+            if (status[i] & PHASECHECK) continue;
+            for (a = 0; a < dim; a++) { rho[i] += dtv * vshift[i][a] * gradr[i][a]; }
+          }
         }
       }
-    }
   }
 }
 
@@ -430,16 +1492,16 @@ void FixRHEO::pre_force(int /*vflag*/)
 
   if (rhosum_flag) compute_rhosum->compute_peratom();
 
-  compute_kernel->compute_peratom();
+    compute_kernel->compute_peratom();
 
-  if (interface_flag) {
-    // Note on first setup, have no forces for pressure to reference
-    compute_interface->compute_peratom();
-  }
+    if (interface_flag) {
+        // Note on first setup, have no forces for pressure to reference
+        compute_interface->compute_peratom();
+    }
 
-  // No need to forward v, rho, or T for compute_grad since already done
-  compute_grad->compute_peratom();
-  compute_grad->forward_gradients();
+    // No need to forward v, rho, or T for compute_grad since already done
+    compute_grad->compute_peratom();
+    compute_grad->forward_gradients();
 
   if (shift_flag) compute_vshift->compute_peratom();
 
@@ -464,8 +1526,8 @@ void FixRHEO::final_integrate()
   int nlocal = atom->nlocal;
   if (igroup == atom->firstgroup) nlocal = atom->nfirst;
 
-  double dtfm, divu;
-  int i, a;
+    double dtfm, divu;
+    int i, a;
 
   double **v = atom->v;
   double **f = atom->f;
@@ -480,10 +1542,10 @@ void FixRHEO::final_integrate()
 
   int dim = domain->dimension;
 
-  // Update velocity
-  for (i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) {
-      if (status[i] & STATUS_NO_INTEGRATION) continue;
+    // Update velocity
+    for (i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+            if (status[i] & STATUS_NO_INTEGRATION) continue;
 
       if (rmass) {
         dtfm = dtf / rmass[i];
@@ -491,7 +1553,12 @@ void FixRHEO::final_integrate()
         dtfm = dtf / mass[type[i]];
       }
 
-      for (a = 0; a < dim; a++) { v[i][a] += dtfm * f[i][a]; }
+            for (a = 0; a < dim; a++) {
+                v[i][a] += dtfm * f[i][a];
+                if ((atom->tag[i] == 1) && (a == 0)) {
+                    SD_PRINTF("final_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+        }
+      }
     }
   }
 

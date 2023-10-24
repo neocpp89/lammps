@@ -46,6 +46,7 @@ class ComputeRHEOPropertyAtom : public Compute {
 
   void pack_phase(int);
   void pack_status(int);
+  void pack_rho(int);
   void pack_chi(int);
   void pack_surface(int);
   void pack_surface_r(int);
