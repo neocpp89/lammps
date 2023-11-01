@@ -26,8 +26,6 @@
 #include "fix_rheo.h"
 #include "force.h"
 #include "memory.h"
-#include "neighbor.h"
-#include "neigh_list.h"
 #include "update.h"
 
 #include <cmath>
@@ -74,7 +72,6 @@ static void set_material_params(void);
 void ComputeRHEOStress::init()
 {
   set_material_params();
-  neighbor->add_request(this, NeighConst::REQ_DEFAULT);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -125,7 +122,7 @@ enum {
   Full2YY = 3,
 };
 
-static void full_from_voigt(double *full, double *voigt)
+static void full_from_voigt(double *full, const double *voigt)
 {
   full[Full3XX] = voigt[VoigtXX];
   full[Full3XY] = voigt[VoigtXY];
@@ -138,7 +135,7 @@ static void full_from_voigt(double *full, double *voigt)
   full[Full3ZZ] = voigt[VoigtZZ];
 }
 
-static void voigt_from_sym_full(double *voigt, double *full)
+static void voigt_from_sym_full(double *voigt, const double *full)
 {
   voigt[VoigtXX] = full[Full3XX];
   voigt[VoigtYY] = full[Full3YY];
@@ -382,10 +379,8 @@ void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
 
 void ComputeRHEOStress::compute_peratom()
 {
-  int i, ii;
-  int inum, *ilist, *numneigh, **firstneigh;
-  int *jlist;
-  int nlocal = atom->nlocal;
+  int i;
+  const int nlocal = atom->nlocal;
 
   // grow local stress array if necessary
   // needs to be atom->nmax in length
@@ -407,17 +402,10 @@ void ComputeRHEOStress::compute_peratom()
   double **velocity_gradient = fix_rheo->compute_grad->gradv;
   const double *rho = atom->rho;
 
-  inum = list->inum;
-  ilist = list->ilist;
-  numneigh = list->numneigh;
-  firstneigh = list->firstneigh;
-
   // initialize arrays
   if (atom->nmax > nmax_store) grow_arrays(atom->nmax);
 
-  for (ii = 0; ii < inum; ii++) {
-    i = ilist[ii];
-
+  for (i = 0; i < nlocal; ++i) {
     double *T = stress[i];
     const double *L = velocity_gradient[i];
     const double density = rho[i];

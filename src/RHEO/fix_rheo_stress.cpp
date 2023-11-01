@@ -85,14 +85,6 @@ void FixRHEOStress::init()
 
 void FixRHEOStress::pre_force(int vflag)
 {
-  // add pre-force and forward to ghosts (not done in store/atom)
-  comm->forward_comm(this);
-}
-
-/* ---------------------------------------------------------------------- */
-
-void FixRHEOStress::end_of_step()
-{
   stress_compute->compute_peratom();
 
   // copy compute to fix property atom
@@ -105,6 +97,15 @@ void FixRHEOStress::end_of_step()
       saved_stress[i][a] = stress[i][a];
 
   stress_compute->addstep(update->ntimestep + 1);
+
+  // add pre-force and forward to ghosts (not done in store/atom)
+  comm->forward_comm(this);
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixRHEOStress::end_of_step()
+{
 }
 
 /* ---------------------------------------------------------------------- */
