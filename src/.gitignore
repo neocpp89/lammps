@@ -229,6 +229,8 @@
 /pair_rheo_react.h
 /pair_rheo_tension.cpp
 /pair_rheo_tension.h
+/pair_rheo_granular.cpp
+/pair_rheo_granular.h
 
 /compute_grid.cpp
 /compute_grid.h
