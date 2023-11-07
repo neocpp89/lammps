@@ -161,9 +161,22 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         sdiv[i][2] += Volj * sdotdw[2];
 
         if (newton_pair || j < nlocal) {
-          sdiv[j][0] -= Voli * sdotdw[0];
-          sdiv[j][1] -= Voli * sdotdw[1];
-          sdiv[j][2] -= Voli * sdotdw[2];
+
+          sdotdw[0] = (stress[j][0] - stress[i][0]) * dWji[0];
+          sdotdw[0] += (stress[j][3] - stress[i][3]) * dWji[1];
+          sdotdw[0] += (stress[j][4] - stress[i][4]) * dWji[2];
+
+          sdotdw[1] = (stress[j][3] - stress[i][3]) * dWji[0];
+          sdotdw[1] += (stress[j][1] - stress[i][1]) * dWji[1];
+          sdotdw[1] += (stress[j][5] - stress[i][5]) * dWji[2];
+
+          sdotdw[2] = (stress[j][4] - stress[i][4]) * dWji[0];
+          sdotdw[2] += (stress[j]][5] - stress[i][5]) * dWji[1];
+          sdotdw[2] += (stress[j][2] - stress[i][2]) * dWji[2];
+
+          sdiv[j][0] += Voli * sdotdw[0];
+          sdiv[j][1] += Voli * sdotdw[1];
+          sdiv[j][2] += Voli * sdotdw[2];
         }
       }
     }
