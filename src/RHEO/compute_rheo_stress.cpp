@@ -171,9 +171,9 @@ static void skw_part(double *skw_A, const double *A, int dim)
 static void sym_part(double *sym_A, const double *A, int dim)
 {
   if (dim == 3) {
-    sym_A[Full3XX] = 0.0;
-    sym_A[Full3YY] = 0.0;
-    sym_A[Full3ZZ] = 0.0;
+    sym_A[Full3XX] = A[Full3XX];
+    sym_A[Full3YY] = A[Full3YY];
+    sym_A[Full3ZZ] = A[Full3ZZ];
 
     sym_A[Full3XY] = 0.5 * (A[Full3XY] + A[Full3YX]);
     sym_A[Full3YX] = sym_A[Full3XY];
@@ -183,8 +183,8 @@ static void sym_part(double *sym_A, const double *A, int dim)
     sym_A[Full3ZY] = sym_A[Full3YZ];
   } else if (dim == 2) {
     // Always expands into a full 3x3 tensor, not a typo.
-    sym_A[Full3XX] = 0.0;
-    sym_A[Full3YY] = 0.0;
+    sym_A[Full3XX] = A[Full2XX];
+    sym_A[Full3YY] = A[Full2YY];
 
     sym_A[Full3XY] = 0.5 * (A[Full2XY] + A[Full2YX]);
     sym_A[Full3YX] = sym_A[Full3XY];
@@ -258,7 +258,7 @@ static void multiply(double *C, const double *A, const double *B)
 
 // Material parameters (to be set by fix arguments..).
 const static double RHO_CRITICAL = 1500.0;
-const static double E = 1e6;
+const static double E = 1e3;
 const static double NU = 0.3;
 const static double COHESION = 0.0;
 const static double GRAINS_D = 0.003;
@@ -268,15 +268,67 @@ const static double MU_2 = 0.6435;
 const static double I_0 = 0.278;
 
 // Derived elastic parameters
-static double G = 0;
-static double K = 0;
-static double LAMBDA = 0;
+// static double G = 0;
+// static double K = 0;
+// static double LAMBDA = 0;
+static const double  G = E / (2.0 * (1.0 + NU));
+static const double  K = E / (3.0 * (1.0 - 2*NU));
+static const double  LAMBDA = K - 2.0 * G / 3.0;
 
 static void set_material_params(void)
 {
-  G = E / (2.0 * (1.0 + NU));
-  K = E / (3.0 * (1.0 - 2*NU));
-  LAMBDA = K - 2.0 * G / 3.0;
+  // G = E / (2.0 * (1.0 + NU));
+  // K = E / (3.0 * (1.0 - 2*NU));
+  // LAMBDA = K - 2.0 * G / 3.0;
+}
+
+void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_stress,
+    const double *velocity_gradient, double density)
+{
+    const int dim = domain->dimension;
+    const double dt = update->dt;
+
+    // Assume velocity gradient is laid out like
+    //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
+    const double *L = velocity_gradient;
+
+
+    // Assume stress is laid out in voigt form like
+    //   Txx, Tyy, Tzz, Txy, Txz, Tyz
+    // then expand.
+    double T[9] = {0};
+    full_from_voigt(T, cauchy_stress);
+
+    double D[9] = {0};
+    double W[9] = {0};
+
+    skw_part(W, L, dim);
+    sym_part(D, L, dim);
+
+    /* trial elastic increment using jaumann rate */
+    double tmp[9] = {0};
+    identity(tmp);
+    scale(tmp, LAMBDA * trace(D));
+
+    double jaumann_stress_increment[9] = {0};
+    copy(jaumann_stress_increment, D);
+    scale(jaumann_stress_increment, 2.0 * G);
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, W, T);
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, T, W);
+    scale(tmp, -1.0);
+    accumulate(jaumann_stress_increment, tmp);
+
+    /* trial stress tensor */
+    double T_tr[9] = {0};
+    copy(T_tr, jaumann_stress_increment);
+    scale(T_tr, dt);
+    accumulate(T_tr, T);
+
+    voigt_from_sym_full(cauchy_stress, T_tr);
 }
 
 void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
@@ -331,11 +383,11 @@ void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
     deviator(T0_tr);
 
     const double p_tr = -trace(T_tr) / 3.0;
-    const double tau_tr = frobenius_norm(T0_tr);
+    const double tau_tr = frobenius_norm(T0_tr) / sqrt(2.0);
 
-    const bool density_flag = (density_flag > RHO_CRITICAL);
+    const bool density_flag = (density <= RHO_CRITICAL);
 
-    double nup_tau;
+    double nup_tau = 0;
     if (density_flag || p_tr <= COHESION) {
         nup_tau = (tau_tr) / (G * dt);
 
@@ -409,7 +461,19 @@ void ComputeRHEOStress::compute_peratom()
     double *T = stress[i];
     const double *L = velocity_gradient[i];
     const double density = rho[i];
-    update_one_material_point_stress(T, L, density);
+    // update_one_material_point_stress(T, L, density);
+    update_one_material_point_stress_elastic(T, L, density);
+
+    // if (i == 501) {
+    //     printf("Txx, Tyy, Tzz, Txy, Txz, Tyz = %17.17g %17.17g %17.17g %17.17g %17.17g %17.17g\n",
+    //         T[0],
+    //         T[1],
+    //         T[2],
+    //         T[3],
+    //         T[4],
+    //         T[5]
+    //     );
+    // }
   }
 
 }

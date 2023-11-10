@@ -22,6 +22,7 @@
 #include "comm.h"
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_grad.h"
+#include "compute_rheo_stress.h"
 #include "domain.h"
 #include "error.h"
 #include "fix_rheo.h"
@@ -103,8 +104,9 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     nmax_store = atom->nmax;
     memory->grow(sdiv, nmax_store, 3, "rheo/granular:sdiv");
   }
-  size_t nbytes = 3 * (nmax_store) * sizeof(double);
-  memset(&sdiv, 0, nbytes);
+
+  const size_t nbytes = 3 * (nmax_store) * sizeof(double);
+  memset(sdiv[0], 0, nbytes);
 
   // loop over neighbors of my atoms
 
@@ -133,28 +135,29 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         r = sqrt(rsq);
         rinv = 1 / r;
 
+        jtype = type[j];
         jmass = mass[jtype];
         rhoj = rho[j];
         Volj = jmass / rho[j];
-        jtype = type[j];
 
         wp = compute_kernel->calc_dw(i, j, dx[0], dx[1], dx[2], r);
         dWij = compute_kernel->dWij;
         dWji = compute_kernel->dWji;
 
         // Add contributions to stress divergence
+        // stress is in Voigt form in order: XX, YY, ZZ, XY, XZ, YZ
 
-        sdotdw[0] = (stress[i][0] - stress[j][0]) * dWij[0];
-        sdotdw[0] += (stress[i][3] - stress[j][3]) * dWij[1];
-        sdotdw[0] += (stress[i][4] - stress[j][4]) * dWij[2];
+        sdotdw[0] =  -(stress[i][0] - stress[j][0]) * dWij[0];
+        sdotdw[0] += -(stress[i][3] - stress[j][3]) * dWij[1];
+        sdotdw[0] += -(stress[i][4] - stress[j][4]) * dWij[2];
 
-        sdotdw[1] = (stress[i][3] - stress[j][3]) * dWij[0];
-        sdotdw[1] += (stress[i][1] - stress[j][1]) * dWij[1];
-        sdotdw[1] += (stress[i][5] - stress[j][5]) * dWij[2];
+        sdotdw[1] =  -(stress[i][3] - stress[j][3]) * dWij[0];
+        sdotdw[1] += -(stress[i][1] - stress[j][1]) * dWij[1];
+        sdotdw[1] += -(stress[i][5] - stress[j][5]) * dWij[2];
 
-        sdotdw[2] = (stress[i][4] - stress[j][4]) * dWij[0];
-        sdotdw[2] += (stress[i][5] - stress[j][5]) * dWij[1];
-        sdotdw[2] += (stress[i][2] - stress[j][2]) * dWij[2];
+        sdotdw[2] =  -(stress[i][4] - stress[j][4]) * dWij[0];
+        sdotdw[2] += -(stress[i][5] - stress[j][5]) * dWij[1];
+        sdotdw[2] += -(stress[i][2] - stress[j][2]) * dWij[2];
 
         sdiv[i][0] += Volj * sdotdw[0];
         sdiv[i][1] += Volj * sdotdw[1];
@@ -162,17 +165,17 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
         if (newton_pair || j < nlocal) {
 
-          sdotdw[0] = (stress[j][0] - stress[i][0]) * dWji[0];
-          sdotdw[0] += (stress[j][3] - stress[i][3]) * dWji[1];
-          sdotdw[0] += (stress[j][4] - stress[i][4]) * dWji[2];
+          sdotdw[0] =  -(stress[j][0] - stress[i][0]) * dWji[0];
+          sdotdw[0] += -(stress[j][3] - stress[i][3]) * dWji[1];
+          sdotdw[0] += -(stress[j][4] - stress[i][4]) * dWji[2];
 
-          sdotdw[1] = (stress[j][3] - stress[i][3]) * dWji[0];
-          sdotdw[1] += (stress[j][1] - stress[i][1]) * dWji[1];
-          sdotdw[1] += (stress[j][5] - stress[i][5]) * dWji[2];
+          sdotdw[1] =  -(stress[j][3] - stress[i][3]) * dWji[0];
+          sdotdw[1] += -(stress[j][1] - stress[i][1]) * dWji[1];
+          sdotdw[1] += -(stress[j][5] - stress[i][5]) * dWji[2];
 
-          sdotdw[2] = (stress[j][4] - stress[i][4]) * dWji[0];
-          sdotdw[2] += (stress[j]][5] - stress[i][5]) * dWji[1];
-          sdotdw[2] += (stress[j][2] - stress[i][2]) * dWji[2];
+          sdotdw[2] =  -(stress[j][4] - stress[i][4]) * dWji[0];
+          sdotdw[2] += -(stress[j][5] - stress[i][5]) * dWji[1];
+          sdotdw[2] += -(stress[j][2] - stress[i][2]) * dWji[2];
 
           sdiv[j][0] += Voli * sdotdw[0];
           sdiv[j][1] += Voli * sdotdw[1];
@@ -186,9 +189,9 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
   // Add forces
   for (i = 0; i < atom->nlocal; i++) {
-    f[i][0] += 0;
-    f[i][1] += 0;
-    f[i][2] += 0;
+    f[i][0] += sdiv[i][0];
+    f[i][1] += sdiv[i][1];
+    f[i][2] += sdiv[i][2];
   }
 }
 
@@ -264,6 +267,9 @@ void PairRHEOGranular::setup()
 
   compute_kernel = fix_rheo->compute_kernel;
   compute_grad = fix_rheo->compute_grad;
+
+  // TODO: another Law of Demeter violation, figure out how to fix
+  dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
 
   if (h != fix_rheo->h)
     error->all(FLERR, "Pair rheo cutoff {} does not agree with fix rheo cutoff {}", h, fix_rheo->h);
