@@ -37,14 +37,16 @@ class PairRHEOGranular : public Pair {
   void unpack_reverse_comm(int, int *, double *) override;
 
  protected:
-  double h, hsq;        // From fix RHEO
+  double h, hsq, rho0;        // From fix RHEO
   double **sdiv;
   int nmax_store;
+  int interface_flag;
 
   void allocate();
 
   class ComputeRHEOKernel *compute_kernel;
   class ComputeRHEOGrad *compute_grad;
+  class ComputeRHEOInterface *compute_interface;
   class FixRHEO *fix_rheo;
   class FixRHEOStress *fix_stress;
 };
