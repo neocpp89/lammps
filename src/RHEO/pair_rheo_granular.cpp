@@ -22,6 +22,7 @@
 #include "comm.h"
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_grad.h"
+#include "compute_rheo_interface.h"
 #include "compute_rheo_stress.h"
 #include "domain.h"
 #include "error.h"
@@ -47,13 +48,15 @@ static constexpr double EPSILON = 1e-2;
 /* ---------------------------------------------------------------------- */
 
 PairRHEOGranular::PairRHEOGranular(LAMMPS *lmp) :
-  Pair(lmp), compute_kernel(nullptr), compute_grad(nullptr),
+  Pair(lmp), compute_interface(nullptr), compute_kernel(nullptr), compute_grad(nullptr),
   fix_rheo(nullptr), fix_stress(nullptr)
 {
   restartinfo = 0;
   single_enable = 0;
   comm_reverse = 3;
   nmax_store = 0;
+
+  sdiv = nullptr;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -64,13 +67,15 @@ PairRHEOGranular::~PairRHEOGranular()
     memory->destroy(setflag);
     memory->destroy(cutsq);
   }
+
+  memory->destroy(sdiv);
 }
 
 /* ---------------------------------------------------------------------- */
 
 void PairRHEOGranular::compute(int eflag, int vflag)
 {
-  int i, j, a, b, ii, jj, inum, jnum, itype, jtype;
+  int i, j, a, b, ii, jj, inum, jnum, itype, jtype, fluidi, fluidj;
   double xtmp, ytmp, ztmp, w, wp;
   double rhoi, rhoj, Voli, Volj;
   double *dWij, *dWji;
@@ -92,6 +97,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   double **stress = fix_stress->array_atom;
   double *special_lj = force->special_lj;
   int *type = atom->type;
+  int *status = atom->status;
 
   inum = list->inum;
   ilist = list->ilist;
@@ -120,7 +126,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     jnum = numneigh[i];
     imass = mass[itype];
     rhoi = rho[i];
-    Voli = imass / rho[i];
+    fluidi = !(status[i] & PHASECHECK);
 
     for (jj = 0; jj < jnum; jj++) {
       j = jlist[jj];
@@ -137,7 +143,23 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
         jtype = type[j];
         jmass = mass[jtype];
+        fluidj = !(status[j] & PHASECHECK);
+
+        rhoi = rho[i];
         rhoj = rho[j];
+        if (interface_flag) {
+          if (fluidi && (!fluidj)) {
+            rhoj = compute_interface->correct_rho(j, i);
+          } else if ((!fluidi) && fluidj) {
+            rhoi = compute_interface->correct_rho(i, j);
+          } else if ((!fluidi) && (!fluidj)) {
+            rhoi = rho0;
+            rhoj = rho0;
+          }
+        }
+
+
+        Voli = imass / rho[i];
         Volj = jmass / rho[j];
 
         wp = compute_kernel->calc_dw(i, j, dx[0], dx[1], dx[2], r);
@@ -267,6 +289,9 @@ void PairRHEOGranular::setup()
 
   compute_kernel = fix_rheo->compute_kernel;
   compute_grad = fix_rheo->compute_grad;
+  compute_interface = fix_rheo->compute_interface;
+  interface_flag = fix_rheo->interface_flag;
+  rho0 = fix_rheo->rho0;
 
   // TODO: another Law of Demeter violation, figure out how to fix
   dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
