@@ -219,6 +219,8 @@
 /fix_rheo_pressure.h
 /fix_rheo_stress.cpp
 /fix_rheo_stress.h
+/compute_rheo_stress.cpp
+/compute_rheo_stress.h
 /fix_rheo_thermal.cpp
 /fix_rheo_thermal.h
 /fix_rheo_viscosity.cpp
