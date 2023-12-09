@@ -28,13 +28,13 @@
 #include "memory.h"
 #include "update.h"
 
+#include <cassert>
 #include <cmath>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 
 /* ---------------------------------------------------------------------- */
-
 ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   Compute(lmp, narg, arg), list(nullptr), stress(nullptr), fix_rheo(nullptr)
 {
@@ -72,6 +72,7 @@ static void set_material_params(void);
 void ComputeRHEOStress::init()
 {
   set_material_params();
+  one_element_test();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -250,7 +251,7 @@ static void multiply(double *C, const double *A, const double *B)
     for (size_t j = 0; j < 3; ++j) {
       C[(3 * i) + j] = 0;
       for (size_t k = 0; k < 3; ++k) {
-        C[(3 * i) + j] += A[(3 * i) + k] * B[(3 * k) + j];
+        C[(3 * i) + j] += (A[(3 * i) + k] * B[(3 * k) + j]);
       }
     }
   }
@@ -258,10 +259,10 @@ static void multiply(double *C, const double *A, const double *B)
 
 // Material parameters (to be set by fix arguments..).
 const static double RHO_CRITICAL = 1500.0;
-const static double E = 1e3;
+const static double E = 1e5;
 const static double NU = 0.3;
 const static double COHESION = 0.0;
-const static double GRAINS_D = 0.003;
+const static double GRAINS_D = 0.005;
 const static double GRAINS_RHO = 2450.0;
 const static double MU_S = 0.3819;
 const static double MU_2 = 0.6435;
@@ -271,9 +272,9 @@ const static double I_0 = 0.278;
 // static double G = 0;
 // static double K = 0;
 // static double LAMBDA = 0;
-static const double  G = E / (2.0 * (1.0 + NU));
-static const double  K = E / (3.0 * (1.0 - 2*NU));
-static const double  LAMBDA = K - 2.0 * G / 3.0;
+static const double K = E / (3.0 * (1.0 - 2*NU));
+static const double G = E / (2.0 * (1.0 + NU));
+static const double LAMBDA = K - (2.0 * G / 3.0);
 
 static void set_material_params(void)
 {
@@ -283,11 +284,8 @@ static void set_material_params(void)
 }
 
 void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_stress,
-    const double *velocity_gradient, double density)
+    const double *velocity_gradient, double density, double dt, int dim)
 {
-    const int dim = domain->dimension;
-    const double dt = update->dt;
-
     // Assume velocity gradient is laid out like
     //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
     const double *L = velocity_gradient;
@@ -331,11 +329,9 @@ void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_
     voigt_from_sym_full(cauchy_stress, T_tr);
 }
 
-void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
-    const double *velocity_gradient, double density)
+void ComputeRHEOStress::update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress,
+    const double *velocity_gradient, double density, double dt, int dim)
 {
-    const int dim = domain->dimension;
-    const double dt = update->dt;
 
     // Assume velocity gradient is laid out like
     //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
@@ -383,6 +379,8 @@ void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
     deviator(T0_tr);
 
     const double p_tr = -trace(T_tr) / 3.0;
+    // const double p_tr = (-trace(T) / 3.0) - dt * (K * trace(D));
+    // *rho_pressure = *rho_pressure - dt * (K * trace(D));
     const double tau_tr = frobenius_norm(T0_tr) / sqrt(2.0);
 
     const bool density_flag = (density <= RHO_CRITICAL);
@@ -417,14 +415,113 @@ void ComputeRHEOStress::update_one_material_point_stress(double *cauchy_stress,
         // Set stress according to T = (tau_tau / tau_tr) * T0_tr - pI.
         identity(T);
         scale(T, -p_tr);
+        // scale(T, -(*rho_pressure));
         scale(T0_tr, scale_factor);
+        // *ptr_t0 = trace(T0_tr);
         accumulate(T, T0_tr);
+        // *ptxxdev = T0_tr[Full3XX];
     } else {
         error->all(FLERR,"Unhandled stress state detected.");
         nup_tau = 0;
     }
 
     voigt_from_sym_full(cauchy_stress, T);
+    *pnup_tau = nup_tau;
+}
+
+static double heaviside(double t)
+{
+    if (t > 0) {
+        return 1.0;
+    } else {
+        return 0.0;
+    }
+}
+
+static double mu_from_voigt_stress(double *Tv)
+{
+    double T[9] = {0};
+    full_from_voigt(T, Tv);
+    const double p = -trace(T) / 3.0;
+    if (p <= 0) {
+        return 1337.0;
+    }
+
+    deviator(T);
+    const double tau = frobenius_norm(T) / sqrt(2.0);
+
+    return tau / p;
+}
+
+void ComputeRHEOStress::one_element_test(void)
+{
+    FILE *fp = fopen("/tmp/one_element_test.csv", "w+");
+    assert(fp != NULL);
+
+    const double t_final = 1.25;
+    const double dt = 1e-6;
+    const int dim = 2;
+    const size_t num_steps = t_final / dt;
+
+    double rho_pressure = 1;
+    double T[6] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
+    double density = 1500.0001;
+    double v = 1.0;
+    const double m = v * density;
+    double gammabar_p = 0;
+    for (size_t i = 0; i < num_steps; ++i) {
+        const double t = i * dt;
+        const double L[4] = {
+            0.1 * (((heaviside(t - 0.25) - heaviside(t - 0.5)) * (fabs(8.0*t - 3.0) - 1)) + ((heaviside(t - 0.75) - heaviside(t - 1.0)) * (1 - fabs(8.0*t - 7.0)))),
+            0.1 * 0.5,
+
+            0.1 * 0.0,
+            0.1 * (((heaviside(t - 0.25) - heaviside(t - 0.5)) * (fabs(8.0*t - 3.0) - 1)) + ((heaviside(t - 0.75) - heaviside(t - 1.0)) * (1 - fabs(8.0*t - 7.0)))),
+        };
+        // const double L[4] = { 0 , 1 , 0 , 0 };
+        // const double L[4] = { 1 , 0 , 0 , 1 };
+        double nup_tau = 0;
+        double tr_t0 = 0;
+        double txxdev = 0;
+        update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+        // update_one_material_point_stress_elastic(T, L, density, dt, dim);
+        gammabar_p += dt * nup_tau;
+
+        v = v * exp(dt * (L[0] + L[3]));
+        density = m / v;
+
+        fprintf(fp,
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+
+            "%17.17g\n",
+
+            t,
+            T[VoigtXX],
+            T[VoigtXY],
+            T[VoigtYY],
+            mu_from_voigt_stress(T),
+
+            density,
+            gammabar_p,
+            tr_t0,
+            rho_pressure,
+            txxdev,
+
+            T[VoigtZZ]
+        );
+    }
+
+    fclose(fp);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -461,8 +558,10 @@ void ComputeRHEOStress::compute_peratom()
     double *T = stress[i];
     const double *L = velocity_gradient[i];
     const double density = rho[i];
-    // update_one_material_point_stress(T, L, density);
-    update_one_material_point_stress_elastic(T, L, density);
+    const int dim = domain->dimension;
+    const double dt = update->dt;
+    // update_one_material_point_stress(T, L, density, dt, dim);
+    update_one_material_point_stress_elastic(T, L, density, dt, dim);
 
     // if (i == 501) {
     //     printf("Txx, Tyy, Tzz, Txy, Txz, Tyz = %17.17g %17.17g %17.17g %17.17g %17.17g %17.17g\n",

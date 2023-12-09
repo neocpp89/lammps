@@ -91,6 +91,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   ev_init(eflag, vflag);
 
   double **x = atom->x;
+  double **v = atom->v;
   double **f = atom->f;
   double *rho = atom->rho;
   double *mass = atom->mass;
@@ -210,9 +211,28 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   if (newton_pair) comm->reverse_comm(this);
 
   // Add forces
+  const tagint * const tag = atom->tag;
+  // double **v = atom->v;
+  const double dt = update->dt;
   for (i = 0; i < atom->nlocal; i++) {
     f[i][0] += sdiv[i][0];
     f[i][1] += sdiv[i][1];
+
+    // if (x[i][1] > 8.0) {
+    //     f[i][1] += sdiv[i][1] - 9.81;
+    // } else {
+    //     f[i][1] += sdiv[i][1] + 9.81;
+    // }
+
+    // modify for boundary a bit
+    // const double width = 0.25;
+    // const double y_c = 2.0;
+
+    // if (1 <= tag[i] && tag[i] <= 200) {
+    //     // const double v_init = v[i][1];
+    //     // f[i][1] = -v_init / (mass[i] * dt);
+    //     v[i][1] = 0;
+    // }
     f[i][2] += sdiv[i][2];
   }
 }
