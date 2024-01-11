@@ -79,21 +79,29 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   double xtmp, ytmp, ztmp, w, wp;
   double rhoi, rhoj, Voli, Volj;
   double *dWij, *dWji;
-  double dx[3], sdotdw[3];
+  double dx[3], sdotdw[3], vi[3], vj[3];
+
+  double q, mu, fp_prefactor, dfp[3], dv[3], du[3];
 
   int *ilist, *jlist, *numneigh, **firstneigh;
-  double imass, jmass, rsq, r, rinv;
+  double imass, jmass, rsq, r, rinv, drho_damp;
 
   int nlocal = atom->nlocal;
   int newton_pair = force->newton_pair;
   int dim = domain->dimension;
 
+  double hinv = 1.0 / h;
+  double hinv3 = hinv * 3.0;
+  double cs = sqrt(csq);
+
   ev_init(eflag, vflag);
 
+  double **gradv = compute_grad->gradv;
   double **x = atom->x;
   double **v = atom->v;
   double **f = atom->f;
   double *rho = atom->rho;
+  double *drho = atom->drho;
   double *mass = atom->mass;
   double **stress = fix_stress->array_atom;
   double *special_lj = force->special_lj;
@@ -167,6 +175,27 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         dWij = compute_kernel->dWij;
         dWji = compute_kernel->dWji;
 
+
+            //Interpolate velocities to midpoint and use this difference for artificial viscosity
+            for (a = 0; a < 3; a++) {
+              vi[a] = v[i][a];
+              vj[a] = v[j][a];
+            }
+
+            fp_prefactor = 0;
+            sub3(vi, vj, dv);
+            copy3(dv, du);
+            for (a = 0; a < dim; a++)
+              for (b = 0; b < dim; b++)
+                du[a] -= 0.5 * (gradv[i][a * dim + b] + gradv[j][a * dim + b]) * dx[b];
+
+            mu = dot3(du, dx) * hinv3;
+            mu /= (rsq * hinv3 * hinv3 + EPSILON);
+            mu = MIN(0.0, mu);
+            q = av * (-2.0 * cs * mu + mu * mu);
+            fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
+            scale3(-fp_prefactor, dWij, dfp);
+
         // Add contributions to stress divergence
         // stress is in Voigt form in order: XX, YY, ZZ, XY, XZ, YZ
 
@@ -186,6 +215,13 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         sdiv[i][1] += Volj * sdotdw[1];
         sdiv[i][2] += Volj * sdotdw[2];
 
+          f[i][0] += dfp[0];
+          f[i][1] += dfp[1];
+          f[i][2] += dfp[2];
+
+          drho_damp = 2 * rho_damp * (rhoj - rhoi) * rinv * wp;
+          drho[i] -= drho_damp * Volj;
+
         if (newton_pair || j < nlocal) {
 
           sdotdw[0] =  -(stress[j][0] - stress[i][0]) * dWji[0];
@@ -203,6 +239,13 @@ void PairRHEOGranular::compute(int eflag, int vflag)
           sdiv[j][0] += Voli * sdotdw[0];
           sdiv[j][1] += Voli * sdotdw[1];
           sdiv[j][2] += Voli * sdotdw[2];
+
+          f[j][0] -= dfp[0];
+          f[j][1] -= dfp[1];
+          f[j][2] -= dfp[2];
+
+          drho[j] += drho_damp * Voli;
+
         }
       }
     }
@@ -260,9 +303,25 @@ void PairRHEOGranular::allocate()
 
 void PairRHEOGranular::settings(int narg, char **arg)
 {
-  if (narg != 1) error->all(FLERR,"Illegal pair_style command");
+  if (narg < 1) error->all(FLERR,"Illegal pair_style command");
 
   h = utils::numeric(FLERR,arg[0],false,lmp);
+
+  av = 0.0;
+  rho_damp = 0.0;
+  int iarg = 1;
+  while (iarg < narg) {
+    if (strcmp(arg[iarg], "rho/damp") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      rho_damp = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      iarg++;
+    } else if (strcmp(arg[iarg], "artificial/visc") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      av = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      iarg++;
+    } else error->all(FLERR,"Illegal pair_style command, {}", arg[iarg]);
+    iarg++;
+  }
 }
 
 /* ----------------------------------------------------------------------
@@ -312,6 +371,7 @@ void PairRHEOGranular::setup()
   compute_interface = fix_rheo->compute_interface;
   interface_flag = fix_rheo->interface_flag;
   rho0 = fix_rheo->rho0;
+  csq = fix_rheo->csq;
 
   // TODO: another Law of Demeter violation, figure out how to fix
   dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
