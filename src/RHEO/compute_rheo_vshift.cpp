@@ -32,6 +32,8 @@
 #include "neigh_list.h"
 #include "neigh_request.h"
 
+#include "update.h"
+
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 
@@ -195,6 +197,7 @@ void ComputeRHEOVShift::compute_peratom()
         if (mask[i] & groupbit) {
           vmag = sqrt(vi[0] * vi[0] + vi[1] * vi[1] + vi[2] * vi[2]);
           prefactor = vmag * volj * dr;
+
           vshift[i][0] += prefactor * dx[0];
           vshift[i][1] += prefactor * dx[1];
           vshift[i][2] += prefactor * dx[2];
@@ -204,6 +207,7 @@ void ComputeRHEOVShift::compute_peratom()
           if (mask[j] & groupbit) {
             vmag = sqrt(vj[0] * vj[0] + vj[1] * vj[1] + vj[2] * vj[2]);
             prefactor = vmag * voli * dr;
+
             vshift[j][0] -= prefactor * dx[0];
             vshift[j][1] -= prefactor * dx[1];
             vshift[j][2] -= prefactor * dx[2];
@@ -232,7 +236,7 @@ void ComputeRHEOVShift::correct_surfaces()
   int nlocal = atom->nlocal;
   int dim = domain->dimension;
 
-  double nx,ny,nz,vx,vy,vz;
+  double nx, ny, nz, vx, vy, vz, dot;
   for (i = 0; i < nlocal; i++) {
     if (mask[i] & groupbit) {
       if ((status[i] & STATUS_SURFACE) || (status[i] & STATUS_LAYER)) {
@@ -240,11 +244,20 @@ void ComputeRHEOVShift::correct_surfaces()
         ny = nsurface[i][1];
         vx = vshift[i][0];
         vy = vshift[i][1];
-        vz = vshift[i][2];
+
+        dot = nx * vx + ny * vy;
+        if (dim == 3) {
+          nz = nsurface[i][2];
+          vz = vshift[i][2];
+          dot += nz * vz;
+        }
+
+        // Allowing shifting into the bulk
+        if (dot < 0.0) continue;
+
         vshift[i][0] = (1 - nx * nx) * vx - nx * ny * vy;
         vshift[i][1] = (1 - ny * ny) * vy - nx * ny * vx;
-        if (dim > 2) {
-          nz = nsurface[i][2];
+        if (dim == 3) {
           vshift[i][0] -= nx * nz * vz;
           vshift[i][1] -= ny * nz * vz;
           vshift[i][2] = (1 - nz * nz) * vz - nz * ny * vy - nx * nz * vx;

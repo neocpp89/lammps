@@ -37,7 +37,7 @@ class PairRHEOGranular : public Pair {
   void unpack_reverse_comm(int, int *, double *) override;
 
  protected:
-  double h, hsq, rho0, csq, av, rho_damp;        // From fix RHEO
+  double h, hsq, *rho0, *csq, *cs, av, rho_damp;        // From fix RHEO
   double **sdiv;
   int nmax_store;
   int interface_flag;

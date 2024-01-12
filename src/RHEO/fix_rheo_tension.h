@@ -11,51 +11,46 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#ifdef COMPUTE_CLASS
+#ifdef FIX_CLASS
 // clang-format off
-ComputeStyle(RHEO/GRAD,ComputeRHEOGrad)
+FixStyle(rheo/tension,FixRHEOTension)
 // clang-format on
 #else
 
-#ifndef LMP_COMPUTE_RHEO_GRAD_H
-#define LMP_COMPUTE_RHEO_GRAD_H
+#ifndef LMP_FIX_RHEO_TENSION_H
+#define LMP_FIX_RHEO_TENSION_H
 
-#include "compute.h"
+#include "fix.h"
 
 namespace LAMMPS_NS {
 
-class ComputeRHEOGrad : public Compute {
+class FixRHEOTension : public Fix {
  public:
-  ComputeRHEOGrad(class LAMMPS *, int, char **);
-  ~ComputeRHEOGrad() override;
+  FixRHEOTension(class LAMMPS *, int, char **);
+  ~FixRHEOTension() override;
+  int setmask() override;
   void init() override;
   void init_list(int, class NeighList *) override;
-  void compute_peratom() override;
+  void setup(int) override;
+  void pre_force(int) override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
-  double memory_usage() override;
-  void forward_gradients();
-  void forward_fields();
-  double **gradv;
-  double **gradr;
-  double **grade;
-  double **gradn;
-  class FixRHEO *fix_rheo;
+  void grow_arrays(int) override;
 
  private:
-  int comm_stage, ncomm_grad, ncomm_field, nmax_store;
-  double cut, cutsq, *rho0;
+  int nmax_store, comm_stage, interface_flag, shift_flag;
+  int index_ct, index_nt, index_cgradt, index_divnt, index_ft, index_wsame;
 
-  int velocity_flag, energy_flag, rho_flag, eta_flag;
-  int interface_flag, remap_v_flag;
+  double *ct, **nt, **cgradt, *divnt, *norm, **ft, *wsame;
+  double alpha, beta, wmin, cmin, vshift_strength, h, hsq, hinv, hinv3, *rho0;
 
   class ComputeRHEOKernel *compute_kernel;
   class ComputeRHEOInterface *compute_interface;
+  class ComputeRHEOVShift *compute_vshift;
+  class FixRHEO *fix_rheo;
   class NeighList *list;
-
-  void grow_arrays(int);
 };
 
 }    // namespace LAMMPS_NS

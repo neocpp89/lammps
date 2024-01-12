@@ -36,7 +36,7 @@ class AtomVecRHEOThermal : virtual public AtomVec {
 
  private:
   int *status;
-  double *conductivity, *temperature, *heatflow;
+  double *conductivity, *temperature, *heatflow, *esph;
   double *pressure, *rho, *drho, *viscosity;
 };
 

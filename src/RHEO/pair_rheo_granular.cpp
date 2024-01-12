@@ -77,14 +77,14 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 {
   int i, j, a, b, ii, jj, inum, jnum, itype, jtype, fluidi, fluidj;
   double xtmp, ytmp, ztmp, w, wp;
-  double rhoi, rhoj, Voli, Volj;
+  double rho0i, rho0j, rhoi, rhoj, Voli, Volj;
   double *dWij, *dWji;
   double dx[3], sdotdw[3], vi[3], vj[3];
 
   double q, mu, fp_prefactor, dfp[3], dv[3], du[3];
 
   int *ilist, *jlist, *numneigh, **firstneigh;
-  double imass, jmass, rsq, r, rinv, drho_damp;
+  double imass, jmass, rsq, r, rinv, drho_damp, cs_ave;
 
   int nlocal = atom->nlocal;
   int newton_pair = force->newton_pair;
@@ -92,7 +92,6 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
   double hinv = 1.0 / h;
   double hinv3 = hinv * 3.0;
-  double cs = sqrt(csq);
 
   ev_init(eflag, vflag);
 
@@ -156,14 +155,17 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
         rhoi = rho[i];
         rhoj = rho[j];
+        rho0i = rho[itype];
+        rho0j = rho[jtype];
+        cs_ave = 0.5 * (cs[itype] + cs[jtype]);
         if (interface_flag) {
           if (fluidi && (!fluidj)) {
             rhoj = compute_interface->correct_rho(j, i);
           } else if ((!fluidi) && fluidj) {
             rhoi = compute_interface->correct_rho(i, j);
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0i;
+            rhoj = rho0i;
           }
         }
 
@@ -192,7 +194,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
             mu = dot3(du, dx) * hinv3;
             mu /= (rsq * hinv3 * hinv3 + EPSILON);
             mu = MIN(0.0, mu);
-            q = av * (-2.0 * cs * mu + mu * mu);
+            q = av * (-2.0 * cs_ave * mu + mu * mu);
             fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
             scale3(-fp_prefactor, dWij, dfp);
 
@@ -372,6 +374,11 @@ void PairRHEOGranular::setup()
   interface_flag = fix_rheo->interface_flag;
   rho0 = fix_rheo->rho0;
   csq = fix_rheo->csq;
+
+  int n = atom->ntypes;
+  memory->create(cs, n + 1, "rheo:cs");
+  for (int i = 1; i <= n; i++)
+    cs[i] = sqrt(csq[i]);
 
   // TODO: another Law of Demeter violation, figure out how to fix
   dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;

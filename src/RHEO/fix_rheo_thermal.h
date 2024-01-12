@@ -42,17 +42,16 @@ class FixRHEOThermal : public Fix {
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
   void reset_dt() override;
-  double calc_cv(int);
+  double calc_cv(int, int);
+  double calc_Tc(int, int);
+  double calc_L(int, int);
 
  private:
-  double *cv_type, cv;
-  double *Tc_type, Tc;
-  double *kappa_type, kappa;
+  double *cv, *Tc, *kappa, *L;
   double dtf, dtv;
-  double cut_bond;
-  int Tc_style, cv_style;
+  double cut_kernel, cut_bond, cutsq_bond;
+  int *cv_style, *Tc_style, *kappa_style, *L_style;
   int btype;
-  int conductivity_style;
   class NeighList *list;
 
   int n_histories;
@@ -64,8 +63,8 @@ class FixRHEOThermal : public Fix {
   class FixUpdateSpecialBonds *fix_update_special_bonds;
 
   void grow_array(int);
-  void break_bonds(int);
-  void create_bonds(int);
+  void break_bonds();
+  void create_bonds();
 };
 
 }    // namespace LAMMPS_NS

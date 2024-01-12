@@ -49,9 +49,8 @@ static constexpr double EPSILON = 1e-2;
 /* ---------------------------------------------------------------------- */
 
 PairRHEO::PairRHEO(LAMMPS *lmp) :
-  Pair(lmp), compute_kernel(nullptr), compute_grad(nullptr),
-  compute_interface(nullptr), fix_rheo(nullptr), fix_pressure(nullptr),
-  fix_stress(nullptr)
+  Pair(lmp), compute_kernel(nullptr), compute_grad(nullptr), compute_interface(nullptr), fix_rheo(nullptr),
+  fix_pressure(nullptr), rho0(nullptr), csq(nullptr), cs(nullptr)
 {
   restartinfo = 0;
   single_enable = 0;
@@ -59,6 +58,7 @@ PairRHEO::PairRHEO(LAMMPS *lmp) :
   artificial_visc_flag = 0;
   rho_damp_flag = 0;
   thermal_flag = 0;
+  harmonic_means_flag = 0;
 
   comm_reverse = 3;
 }
@@ -71,6 +71,8 @@ PairRHEO::~PairRHEO()
     memory->destroy(setflag);
     memory->destroy(cutsq);
   }
+
+  memory->destroy(cs);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -80,8 +82,8 @@ void PairRHEO::compute(int eflag, int vflag)
   int i, j, a, b, ii, jj, inum, jnum, itype, jtype;
   int pair_force_flag, pair_rho_flag, pair_avisc_flag;
   int fluidi, fluidj;
-  double xtmp, ytmp, ztmp, w, wp, Ti, Tj, dT;
-  double rhoi, rhoj, voli, volj, Pi, Pj, etai, etaj, kappai, kappaj;
+  double xtmp, ytmp, ztmp, w, wp, Ti, Tj, dT, csq_ave, cs_ave;
+  double rhoi, rhoj, rho0i, rho0j, voli, volj, Pi, Pj, etai, etaj, kappai, kappaj, eta_ave, kappa_ave,dT_prefactor;
   double mu, q, fp_prefactor, drho_damp, fmag, psi_ij, Fij;
   double *dWij, *dWji, *dW1ij, *dW1ji;
   double dx[3], du[3], dv[3], fv[3], dfp[3], fsolid[3], ft[3], vi[3], vj[3];
@@ -96,7 +98,6 @@ void PairRHEO::compute(int eflag, int vflag)
   ev_init(eflag, vflag);
 
   double **gradv = compute_grad->gradv;
-  double **gradt = compute_grad->gradt;
   double **gradr = compute_grad->gradr;
   double **v = atom->v;
   double **x = atom->x;
@@ -113,6 +114,7 @@ void PairRHEO::compute(int eflag, int vflag)
   int *type = atom->type;
   int *status = atom->status;
   tagint *tag = atom->tag;
+  double fnorm, ftang[3];
 
   double **fp_store, *chi;
   if (compute_interface) {
@@ -181,6 +183,9 @@ void PairRHEO::compute(int eflag, int vflag)
           kappaj = conductivity[j];
         }
 
+        cs_ave = 0.5 * (cs[itype] + cs[jtype]);
+        csq_ave = cs_ave * cs_ave;
+
         pair_rho_flag = 0;
         pair_force_flag = 0;
         pair_avisc_flag = 0;
@@ -204,31 +209,31 @@ void PairRHEO::compute(int eflag, int vflag)
         // Add corrections for walls
         rhoi = rho[i];
         rhoj = rho[j];
+        rho0i = rho[itype];
+        rho0j = rho[jtype];
         Pi = pressure[i];
         Pj = pressure[j];
         fmag = 0;
         if (interface_flag) {
           if (fluidi && (!fluidj)) {
             compute_interface->correct_v(vi, vj, i, j);
-            //compute_interface->correct_v(vj, vi, j, i);
             rhoj = compute_interface->correct_rho(j, i);
-            Pj = fix_pressure->calc_pressure(rhoj);
+            Pj = fix_pressure->calc_pressure(rhoj, jtype);
 
             if ((chi[j] > 0.9) && (r < (h * 0.5)))
-              fmag = (chi[j] - 0.9) * (h * 0.5 - r) * rho0 * csq * h * rinv;
+              fmag = (chi[j] - 0.9) * (h * 0.5 - r) * rho0j * csq_ave * h * rinv;
 
           } else if ((!fluidi) && fluidj) {
             compute_interface->correct_v(vj, vi, j, i);
-            //compute_interface->correct_v(vi, vj, i, j);
             rhoi = compute_interface->correct_rho(i, j);
-            Pi = fix_pressure->calc_pressure(rhoi);
+            Pi = fix_pressure->calc_pressure(rhoi, itype);
 
             if (chi[i] > 0.9 && r < (h * 0.5))
-              fmag = (chi[i] - 0.9) * (h * 0.5 - r) * rho0 * csq * h * rinv;
+              fmag = (chi[i] - 0.9) * (h * 0.5 - r) * rho0i * csq_ave * h * rinv;
 
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0i;
+            rhoj = rho0j;
           }
         }
 
@@ -241,14 +246,19 @@ void PairRHEO::compute(int eflag, int vflag)
 
         // Thermal Evolution
         if (thermal_flag) {
+          if (harmonic_means_flag) {
+            kappa_ave = 2.0 * kappai * kappaj / (kappai + kappaj);
+          } else {
+            kappa_ave = 0.5 * (kappai + kappaj);
+          }
+          dT_prefactor = 2.0 * kappa_ave * (Ti - Tj) * rinv * rinv * voli * volj * 2.0 / (rhoi + rhoj);
+
           dT = dot3(dx, dWij);
-          dT *= (kappai + kappaj) * (Ti - Tj) * rinv * rinv * voli * volj / rho0;
-          heatflow[i] += dT;
+          heatflow[i] += dT * dT_prefactor;
 
           if (newton_pair || j < nlocal) {
             dT = dot3(dx, dWji);
-            dT *= (kappai + kappaj) * (Tj - Ti) * rinv * rinv * voli * volj / rho0;
-            heatflow[j] -= dT;
+            heatflow[j] += dT * dT_prefactor;
           }
         }
 
@@ -257,6 +267,12 @@ void PairRHEO::compute(int eflag, int vflag)
           //Hydrostatic pressure forces
           fp_prefactor = voli * volj * (Pj + Pi);
           sub3(vi, vj, dv);
+
+          if (harmonic_means_flag) {
+            eta_ave = 2.0 * etai * etaj / (etai + etaj);
+          } else {
+            eta_ave = 0.5 * (etai + etaj);
+          }
 
           //Add artificial viscous pressure if required
           if (artificial_visc_flag && pair_avisc_flag) {
@@ -269,7 +285,7 @@ void PairRHEO::compute(int eflag, int vflag)
             mu = dot3(du, dx) * hinv3;
             mu /= (rsq * hinv3 * hinv3 + EPSILON);
             mu = MIN(0.0, mu);
-            q = av * (-2.0 * cs * mu + mu * mu);
+            q = av * (-2.0 * cs_ave * mu + mu * mu);
             fp_prefactor += voli * volj * q * (rhoj + rhoi);
           }
 
@@ -281,7 +297,7 @@ void PairRHEO::compute(int eflag, int vflag)
             fv[a] = 0.0;
             for (b = 0; b < dim; b++)
               fv[a] += dv[a] * dx[b] * dWij[b];
-            fv[a] *= (etai + etaj) * voli * volj * rinv * rinv;
+            fv[a] *= 2.0 * eta_ave * voli * volj * rinv * rinv;
           }
 
           add3(fv, dfp, ft);
@@ -291,26 +307,38 @@ void PairRHEO::compute(int eflag, int vflag)
           f[i][1] += ft[1];
           f[i][2] += ft[2];
 
-          if (evflag) // Does not account for unbalanced forces
-            ev_tally_xyz(i, j, nlocal, newton_pair, 0.0, 0.0, ft[0], ft[1], ft[2], dx[0], dx[1], dx[2]);
+          if (evflag) {
+            fnorm = dot3(ft, dx) * rinv * rinv * 0.5;
+            ftang[0] = ft[0] * 0.5 - dx[0] * fnorm;
+            ftang[1] = ft[1] * 0.5 - dx[1] * fnorm;
+            ftang[2] = ft[2] * 0.5 - dx[2] * fnorm;
+            ev_tally_nt(i, j, nlocal, newton_pair, 0.0, 0.0, fnorm, ftang[0], ftang[1], ftang[2], dx[0], dx[1], dx[2]);
+          }
 
           if (newton_pair || j < nlocal) {
             for (a = 0; a < dim; a ++) {
               fv[a] = 0.0;
               for (b = 0; b < dim; b++)
                 fv[a] += (vi[a] - vj[a]) * dx[b] * dWji[b];
-              fv[a] *= -(etai + etaj) * voli * volj * rinv * rinv;
+              fv[a] *= -2.0 * eta_ave * voli * volj * rinv * rinv;
               // flip sign here b/c -= at accummulator
             }
 
             scale3(fp_prefactor, dWji, dfp);
-
             add3(fv, dfp, ft);
             add3(fsolid, ft, ft);
 
             f[j][0] -= ft[0];
             f[j][1] -= ft[1];
             f[j][2] -= ft[2];
+
+            if (evflag) {
+              fnorm = - dot3(ft, dx) * rinv * rinv * 0.5;
+              ftang[0] = ft[0] * 0.5 + dx[0] * fnorm;
+              ftang[1] = ft[1] * 0.5 + dx[1] * fnorm;
+              ftang[2] = ft[2] * 0.5 + dx[2] * fnorm;
+              ev_tally_nt(i, j, nlocal, newton_pair, 0.0, 0.0, fnorm, ftang[0], ftang[1], ftang[2], -dx[0], -dx[1], -dx[2]);
+            }
           }
 
           if (compute_interface) {
@@ -337,7 +365,7 @@ void PairRHEO::compute(int eflag, int vflag)
               psi_ij += 0.5 * (gradr[i][a] + gradr[j][a]) * dx[a];
             drho[i] += 2 * rho_damp * psi_ij * Fij * volj;
           } else {
-            drho_damp = 2 * rho_damp * (rhoj - rhoi) * rinv * wp;
+            drho_damp = 2 * rho_damp * ((rhoj - rho0[jtype]) - (rhoi - rho0[itype])) * rinv * wp;
             drho[i] -= drho_damp * volj;
           }
 
@@ -358,7 +386,7 @@ void PairRHEO::compute(int eflag, int vflag)
   if (vflag_fdotr) virial_fdotr_compute();
 
   if (compute_interface) {
-    comm->reverse_comm(this);
+    if (newton_pair) comm->reverse_comm(this);
     comm->forward_comm(this);
   }
 }
@@ -386,23 +414,25 @@ void PairRHEO::allocate()
 
 void PairRHEO::settings(int narg, char **arg)
 {
-  if (narg < 1) error->all(FLERR,"Illegal pair_style command");
+  if (narg < 1) error->all(FLERR, "Illegal pair_style command");
 
-  h = utils::numeric(FLERR,arg[0],false,lmp);
+  h = utils::numeric(FLERR, arg[0], false, lmp);
 
   int iarg = 1;
   while (iarg < narg) {
     if (strcmp(arg[iarg], "rho/damp") == 0) {
-      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal pair_style command");
       rho_damp_flag = 1;
-      rho_damp = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      rho_damp = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg++;
     } else if (strcmp(arg[iarg], "artificial/visc") == 0) {
-      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal pair_style command");
       artificial_visc_flag = 1;
-      av = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      av = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg++;
-    } else error->all(FLERR,"Illegal pair_style command, {}", arg[iarg]);
+    } else if (strcmp(arg[iarg], "harmonic/means") == 0) {
+      harmonic_means_flag = 1;
+    } else error->all(FLERR, "Illegal pair_style command, {}", arg[iarg]);
     iarg++;
   }
 }
@@ -414,13 +444,13 @@ void PairRHEO::settings(int narg, char **arg)
 void PairRHEO::coeff(int narg, char **arg)
 {
   if (narg != 2)
-    error->all(FLERR,"Incorrect number of args for pair_style rheo coefficients");
+    error->all(FLERR, "Incorrect number of args for pair_style rheo coefficients");
   if (!allocated)
     allocate();
 
   int ilo, ihi, jlo, jhi;
-  utils::bounds(FLERR, arg[0], 1, atom->ntypes, ilo, ihi,error);
-  utils::bounds(FLERR, arg[1], 1, atom->ntypes, jlo, jhi,error);
+  utils::bounds(FLERR, arg[0], 1, atom->ntypes, ilo, ihi, error);
+  utils::bounds(FLERR, arg[1], 1, atom->ntypes, jlo, jhi, error);
 
   int count = 0;
   for (int i = ilo; i <= ihi; i++) {
@@ -431,7 +461,7 @@ void PairRHEO::coeff(int narg, char **arg)
   }
 
   if (count == 0)
-    error->all(FLERR,"Incorrect args for pair rheo coefficients");
+    error->all(FLERR, "Incorrect args for pair rheo coefficients");
 }
 
 /* ----------------------------------------------------------------------
@@ -471,11 +501,15 @@ void PairRHEO::setup()
   hsq = h * h;
   hinv = 1.0 / h;
   hinv3 = hinv * 3.0;
-  cs = sqrt(csq);
   laplacian_order = -1;
 
+  int n = atom->ntypes;
+  memory->create(cs, n + 1, "rheo:cs");
+  for (int i = 1; i <= n; i++)
+    cs[i] = sqrt(csq[i]);
+
   if (comm->ghost_velocity == 0)
-    error->all(FLERR,"Pair RHEO requires ghost atoms store velocity");
+    error->all(FLERR, "Pair RHEO requires ghost atoms store velocity");
 
   if (laplacian_order == -1) {
     if (fix_rheo->kernel_style == RK2)
@@ -493,9 +527,8 @@ void PairRHEO::setup()
 
 double PairRHEO::init_one(int i, int j)
 {
-  if (setflag[i][j] == 0) {
-      error->all(FLERR,"All pair rheo coeffs are not set");
-  }
+  if (setflag[i][j] == 0)
+    error->all(FLERR, "All pair rheo coeffs are not set");
 
   return h;
 }

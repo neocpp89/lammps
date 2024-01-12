@@ -28,6 +28,7 @@
 #include "domain.h"
 #include "error.h"
 #include "force.h"
+#include "memory.h"
 #include "modify.h"
 #include "update.h"
 #include "utils.h"
@@ -40,7 +41,7 @@ using namespace FixConst;
 
 FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   Fix(lmp, narg, arg), compute_grad(nullptr), compute_kernel(nullptr), compute_surface(nullptr),
-  compute_interface(nullptr), compute_rhosum(nullptr), compute_vshift(nullptr)
+  compute_interface(nullptr), compute_rhosum(nullptr), compute_vshift(nullptr), rho0(nullptr), csq(nullptr)
 {
   time_integrate = 1;
 
@@ -54,71 +55,81 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   interface_flag = 0;
   surface_flag = 0;
 
-  rho0 = 1.0;
-  csq = 1.0;
+  int i;
+  int n = atom->ntypes;
+  memory->create(rho0, n + 1, "rheo:rho0");
+  memory->create(csq, n + 1, "rheo:csq");
+  for (i = 1; i <= n; i++) {
+    rho0[i] = 1.0;
+    csq[i] = 1.0;
+  }
 
   if (igroup != 0)
-    error->all(FLERR,"fix rheo command requires group all");
+    error->all(FLERR, "fix rheo command requires group all");
 
   if (atom->pressure_flag != 1)
-    error->all(FLERR,"fix rheo command requires atom_style with pressure");
+    error->all(FLERR, "fix rheo command requires atom_style with pressure");
   if (atom->rho_flag != 1)
-    error->all(FLERR,"fix rheo command requires atom_style with density");
+    error->all(FLERR, "fix rheo command requires atom_style with density");
   if (atom->viscosity_flag != 1)
-    error->all(FLERR,"fix rheo command requires atom_style with viscosity");
+    error->all(FLERR, "fix rheo command requires atom_style with viscosity");
   if (atom->status_flag != 1)
-    error->all(FLERR,"fix rheo command requires atom_style with status");
+    error->all(FLERR, "fix rheo command requires atom_style with status");
 
   if (narg < 5)
-    error->all(FLERR,"Insufficient arguments for fix rheo command");
+    error->all(FLERR, "Insufficient arguments for fix rheo command");
 
-  h = utils::numeric(FLERR,arg[3],false,lmp);
+  h = utils::numeric(FLERR, arg[3], false, lmp);
   cut = h;
-  if (strcmp(arg[4],"quintic") == 0) {
+  if (strcmp(arg[4], "quintic") == 0) {
       kernel_style = QUINTIC;
-  } else if (strcmp(arg[4],"RK0") == 0) {
+  } else if (strcmp(arg[4], "RK0") == 0) {
       kernel_style = RK0;
-  } else if (strcmp(arg[4],"RK1") == 0) {
+  } else if (strcmp(arg[4], "RK1") == 0) {
       kernel_style = RK1;
-  } else if (strcmp(arg[4],"RK2") == 0) {
+  } else if (strcmp(arg[4], "RK2") == 0) {
       kernel_style = RK2;
-  } else error->all(FLERR,"Unknown kernel style {} in fix rheo", arg[4]);
-  zmin_kernel = utils::numeric(FLERR,arg[5],false,lmp);
+  } else error->all(FLERR, "Unknown kernel style {} in fix rheo", arg[4]);
+  zmin_kernel = utils::numeric(FLERR, arg[5], false, lmp);
 
   int iarg = 6;
   while (iarg < narg){
-    if (strcmp(arg[iarg],"shift") == 0) {
+    if (strcmp(arg[iarg], "shift") == 0) {
       shift_flag = 1;
-    } else if (strcmp(arg[iarg],"thermal") == 0) {
+    } else if (strcmp(arg[iarg], "thermal") == 0) {
       thermal_flag = 1;
-    } else if (strcmp(arg[iarg],"surface/detection") == 0) {
+    } else if (strcmp(arg[iarg], "surface/detection") == 0) {
       surface_flag = 1;
-      if(iarg + 2 >= narg) error->all(FLERR,"Illegal surface/detection option in fix rheo");
+      if(iarg + 3 >= narg) error->all(FLERR, "Illegal surface/detection option in fix rheo");
       if (strcmp(arg[iarg + 1], "coordination") == 0) {
         surface_style = COORDINATION;
-        zmin_surface = utils::inumeric(FLERR,arg[iarg + 2],false,lmp);
-        zmin_splash = utils::inumeric(FLERR,arg[iarg + 3],false,lmp);
+        zmin_surface = utils::inumeric(FLERR, arg[iarg + 2], false, lmp);
+        zmin_splash = utils::inumeric(FLERR, arg[iarg + 3], false, lmp);
       } else if (strcmp(arg[iarg + 1], "divergence") == 0) {
         surface_style = DIVR;
-        divr_surface = utils::numeric(FLERR,arg[iarg + 2],false,lmp);
-        zmin_splash = utils::inumeric(FLERR,arg[iarg + 3],false,lmp);
+        divr_surface = utils::numeric(FLERR, arg[iarg + 2], false, lmp);
+        zmin_splash = utils::inumeric(FLERR, arg[iarg + 3], false, lmp);
       } else {
-        error->all(FLERR,"Illegal surface/detection option in fix rheo, {}", arg[iarg + 1]);
+        error->all(FLERR, "Illegal surface/detection option in fix rheo, {}", arg[iarg + 1]);
       }
 
       iarg += 3;
-    } else if (strcmp(arg[iarg],"interface/reconstruct") == 0) {
+    } else if (strcmp(arg[iarg], "interface/reconstruct") == 0) {
       interface_flag = 1;
-    } else if (strcmp(arg[iarg],"rho/sum") == 0) {
+    } else if (strcmp(arg[iarg], "rho/sum") == 0) {
       rhosum_flag = 1;
-    } else if (strcmp(arg[iarg],"density") == 0) {
-      if(iarg + 1 >= narg) error->all(FLERR,"Illegal rho0 option in fix rheo");
-      rho0 = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
-      iarg += 1;
-    } else if (strcmp(arg[iarg],"sound/squared") == 0) {
-      if(iarg+1 >= narg) error->all(FLERR,"Illegal csq option in fix rheo");
-      csq = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
-      iarg += 1;
+    } else if (strcmp(arg[iarg], "density") == 0) {
+      if (iarg + n >= narg) error->all(FLERR, "Illegal rho0 option in fix rheo");
+      for (i = 1; i <= n; i++)
+        rho0[i] = utils::numeric(FLERR, arg[iarg + i], false, lmp);
+      iarg += n;
+    } else if (strcmp(arg[iarg], "speed/sound") == 0) {
+      if (iarg + n >= narg) error->all(FLERR, "Illegal csq option in fix rheo");
+      for (i = 1; i <= n; i++) {
+        csq[i] = utils::numeric(FLERR, arg[iarg + i], false, lmp);
+        csq[i] *= csq[i];
+      }
+      iarg += n;
     } else {
       error->all(FLERR, "Illegal fix rheo command: {}", arg[iarg]);
     }
@@ -133,9 +144,12 @@ FixRHEO::~FixRHEO()
   if (compute_kernel) modify->delete_compute("rheo_kernel");
   if (compute_grad) modify->delete_compute("rheo_grad");
   if (compute_interface) modify->delete_compute("rheo_interface");
-  if (compute_surface) modify->delete_compute("compute_surface");
+  if (compute_surface) modify->delete_compute("rheo_surface");
   if (compute_rhosum) modify->delete_compute("rheo_rhosum");
   if (compute_vshift) modify->delete_compute("rheo_vshift");
+
+  memory->destroy(csq);
+  memory->destroy(rho0);
 }
 
 
@@ -150,7 +164,7 @@ void FixRHEO::post_constructor()
   compute_kernel->fix_rheo = this;
 
   std::string cmd = "rheo_grad all RHEO/GRAD velocity rho viscosity";
-  if (thermal_flag) cmd += "temperature";
+  if (thermal_flag) cmd += " energy";
   compute_grad = dynamic_cast<ComputeRHEOGrad *>(modify->add_compute(cmd));
   compute_grad->fix_rheo = this;
 
@@ -198,7 +212,7 @@ void FixRHEO::init()
   dtf = 0.5 * update->dt * force->ftm2v;
 
   if (modify->get_fix_by_style("^rheo$").size() > 1)
-    error->all(FLERR,"Can only specify one instance of fix rheo");
+    error->all(FLERR, "Can only specify one instance of fix rheo");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -211,7 +225,10 @@ void FixRHEO::setup_pre_force(int /*vflag*/)
     error->all(FLERR, "Fix RHEO must be defined before all other RHEO fixes");
 
   // Calculate surfaces
-  if (surface_flag) compute_surface->compute_peratom();
+  if (surface_flag) {
+    compute_kernel->compute_coordination();
+    compute_surface->compute_peratom();
+  }
 
   pre_force(0);
 }
@@ -254,7 +271,7 @@ void FixRHEO::setup(int /*vflag*/)
       covered = 0;
       for (auto fix : therm_fixes)
         if (mask[i] & fix->groupbit) covered = 1;
-      if (!covered) v_coverage_flag = 0;
+      if (!covered) t_coverage_flag = 0;
     }
   }
 
@@ -262,6 +279,9 @@ void FixRHEO::setup(int /*vflag*/)
     error->one(FLERR, "Fix rheo/viscosity does not fully cover all atoms");
   if (!t_coverage_flag)
     error->one(FLERR, "Fix rheo/thermal does not fully cover all atoms");
+
+  if (rhosum_flag)
+    compute_rhosum->compute_peratom();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -348,7 +368,6 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
   // Shifting atoms
   if (shift_flag) {
-    compute_vshift->correct_surfaces(); // Could this be moved to preforce after the surface fix runs?
     for (i = 0; i < nlocal; i++) {
 
       if (status[i] & STATUS_NO_SHIFT) continue;
@@ -382,6 +401,7 @@ void FixRHEO::pre_force(int /*vflag*/)
     compute_rhosum->compute_peratom();
 
   compute_kernel->compute_peratom();
+
   if (interface_flag) {
     // Note on first setup, have no forces for pressure to reference
     compute_interface->compute_peratom();
@@ -403,7 +423,11 @@ void FixRHEO::pre_force(int /*vflag*/)
       status[i] &= OPTIONSMASK;
 
   // Calculate surfaces, update status
-  if (surface_flag) compute_surface->compute_peratom();
+  if (surface_flag) {
+    compute_surface->compute_peratom();
+    if (shift_flag)
+      compute_vshift->correct_surfaces();
+  }
 }
 
 /* ---------------------------------------------------------------------- */
