@@ -159,6 +159,21 @@ void PairRHEO::compute(int eflag, int vflag)
       Ti = temperature[i];
     }
 
+    if (0)
+    {
+        const double width = 0.25;
+        const double y_c = 2.0;
+        const double g = 0.0245;
+        double s = (ytmp - y_c) / width;
+        if (s >= 1) {
+            f[i][1] += -g;
+        } else if (s <= -1) {
+            f[i][1] +=  g;
+        } else {
+            f[i][1] += -g * s;
+        }
+    }
+
     for (jj = 0; jj < jnum; jj++) {
       j = jlist[jj];
       j &= NEIGHMASK;

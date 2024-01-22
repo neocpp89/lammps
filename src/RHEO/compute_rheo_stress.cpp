@@ -258,9 +258,13 @@ static void multiply(double *C, const double *A, const double *B)
 }
 
 // Material parameters (to be set by fix arguments..).
-const static double RHO_CRITICAL = 1500.0;
-const static double E = 1e5;
-const static double NU = 0.3;
+const static double RHO_CRITICAL = 1.0;
+// const static double RHO_CRITICAL = 1500.0;
+// const static double E = 1e5;
+const static double E = 1e4;
+// const static double E = 1e3;
+// const static double NU = 0.3;
+const static double NU = 0.0;
 const static double COHESION = 0.0;
 const static double GRAINS_D = 0.005;
 const static double GRAINS_RHO = 2450.0;
@@ -314,10 +318,18 @@ void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_
     accumulate(jaumann_stress_increment, tmp);
 
     multiply(tmp, W, T);
+    // if (tmp[0] != 0.0) {
+    //     printf("WTxx = %17.9g\n", tmp[0]);
+    //     printf("Txx = %17.9g\n", T[0]);
+    //     printf("Wxx = %17.9g\n", W[0]);
+    // }
     accumulate(jaumann_stress_increment, tmp);
 
     multiply(tmp, T, W);
     scale(tmp, -1.0);
+    // if (tmp[0] != 0.0) {
+    //     printf("TWxx = %17.9g\n", tmp[0]);
+    // }
     accumulate(jaumann_stress_increment, tmp);
 
     /* trial stress tensor */
@@ -465,7 +477,8 @@ void ComputeRHEOStress::one_element_test(void)
 
     double rho_pressure = 1;
     double T[6] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
-    double density = 1500.0001;
+    // double density = 1500.0001;
+    double density = RHO_CRITICAL + 1e-5;
     double v = 1.0;
     const double m = v * density;
     double gammabar_p = 0;
@@ -562,6 +575,23 @@ void ComputeRHEOStress::compute_peratom()
     const double dt = update->dt;
     // update_one_material_point_stress(T, L, density, dt, dim);
     update_one_material_point_stress_elastic(T, L, density, dt, dim);
+
+    if (atom->tag[i] == 1) {
+        printf("txx %17.9g\n", T[VoigtXX]);
+        printf("txy %17.9g\n", T[VoigtXY]);
+        printf("tyy %17.9g\n", T[VoigtYY]);
+    }
+
+    // if (
+    //         ((91 <= atom->tag[i]) &&
+    //         (atom->tag[i] <= 100)) ||
+    //         ((101 <= atom->tag[i]) &&
+    //         (atom->tag[i] <= 110))
+    //    )
+    // {
+    //     T[1] = 0;
+    //     T[4] = 0;
+    // }
 
     // if (i == 501) {
     //     printf("Txx, Tyy, Tzz, Txy, Txz, Tyz = %17.17g %17.17g %17.17g %17.17g %17.17g %17.17g\n",

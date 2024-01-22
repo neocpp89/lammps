@@ -32,9 +32,12 @@
 #include "update.h"
 
 #include <cmath>
+#include <cstdio>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
+
+enum {PARTICLE_ID = 1};
 
 enum{COMMGRAD, COMMFIELD};
 
@@ -186,15 +189,24 @@ void ComputeRHEOGrad::compute_peratom()
     jlist = firstneigh[i];
     jnum = numneigh[i];
 
+    if (atom->tag[i] == PARTICLE_ID) {
+        printf("pos [%17.9g %17.9g %17.9g]\n", xtmp, ytmp, ztmp);
+    }
     for (jj = 0; jj < jnum; jj++) {
       j = jlist[jj];
       j &= NEIGHMASK;
 
       jtype = type[j];
-      delx = xtmp - x[j][0];
+      const double xptmp = x[j][0];
+      // const double xptmp = fmod(x[j][0], 0.5);
+      delx = xtmp - xptmp;
       dely = ytmp - x[j][1];
       delz = ztmp - x[j][2];
       rsq = delx * delx + dely * dely + delz * delz;
+
+      if (atom->tag[i] == PARTICLE_ID) {
+        printf("nl %d %17.9g %17.9g [%17.9g %17.9g %17.9g]\n", (int)atom->tag[j], rsq, cutsq, xptmp, x[j][1], x[j][2]);
+      }
 
       if (rsq < cutsq) {
         fluidj = !(status[j] & PHASECHECK);
@@ -257,6 +269,16 @@ void ComputeRHEOGrad::compute_peratom()
             gradn[i][a] -= deta * Volj * dWij[a];
         }
 
+        if (atom->tag[i] == PARTICLE_ID) {
+            // for (a = 0; a < dim; a++) {
+            //     for (b = 0; b < dim; b++) {
+            //         if (velocity_flag) // uxx uxy uxz uyx uyy uyz uzx uzy uzz
+            //             gradv[i][a * dim + b] -= vij[a] * Volj * dWij[b];
+                    printf("tag = %d vi = %17.9g vj = %17.9g vij = %17.9g Volj = %17.9g dWij[0] = %17.9g dWij[1] = %17.9g\n", atom->tag[j], vi[1], vj[1], vij[1], Volj, dWij[0], dWij[1]);
+            //     }
+            // }
+        }
+
         if (newton || j < nlocal) {
           for (a = 0; a < dim; a++) {
             for (b = 0; b < dim; b++) {
@@ -278,6 +300,7 @@ void ComputeRHEOGrad::compute_peratom()
     }
   }
 
+  printf("----\n");
   if (newton) comm->reverse_comm(this);
 }
 

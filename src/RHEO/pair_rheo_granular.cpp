@@ -38,6 +38,7 @@
 #include "utils.h"
 
 #include <cmath>
+#include <fenv.h>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
@@ -57,6 +58,7 @@ PairRHEOGranular::PairRHEOGranular(LAMMPS *lmp) :
   nmax_store = 0;
 
   sdiv = nullptr;
+  feenableexcept(FE_DIVBYZERO);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -170,39 +172,88 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         // Add contributions to stress divergence
         // stress is in Voigt form in order: XX, YY, ZZ, XY, XZ, YZ
 
-        sdotdw[0] =  -(stress[i][0] - stress[j][0]) * dWij[0];
-        sdotdw[0] += -(stress[i][3] - stress[j][3]) * dWij[1];
-        sdotdw[0] += -(stress[i][4] - stress[j][4]) * dWij[2];
+        // Txx Tyy Tzz Txy Txz Tyz
+        double tixx = stress[i][0];
+        double tiyy = stress[i][1];
+        double tixy = stress[i][3];
+        // damping
+        // {
+        //     double **velocity_gradient = compute_grad->gradv;
 
-        sdotdw[1] =  -(stress[i][3] - stress[j][3]) * dWij[0];
-        sdotdw[1] += -(stress[i][1] - stress[j][1]) * dWij[1];
-        sdotdw[1] += -(stress[i][5] - stress[j][5]) * dWij[2];
+        //     // Assume velocity gradient is laid out like
+        //     //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
+        //     const double *L = velocity_gradient[i];
+        //     const double myeta = 1;
+        //     tixx += myeta * (L[0]);
+        //     tiyy += myeta * (L[3]);
+        //     tixy += myeta * 0.5 * (L[1] + L[2]);
+        // }
 
-        sdotdw[2] =  -(stress[i][4] - stress[j][4]) * dWij[0];
-        sdotdw[2] += -(stress[i][5] - stress[j][5]) * dWij[1];
-        sdotdw[2] += -(stress[i][2] - stress[j][2]) * dWij[2];
+        double tjxx = stress[j][0];
+        double tjyy = stress[j][1];
+        double tjxy = stress[j][3];
+        // damping
+        // {
+        //     double **velocity_gradient = compute_grad->gradv;
 
-        sdiv[i][0] += Volj * sdotdw[0];
-        sdiv[i][1] += Volj * sdotdw[1];
-        sdiv[i][2] += Volj * sdotdw[2];
+        //     // Assume velocity gradient is laid out like
+        //     //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
+        //     const double *L = velocity_gradient[j];
+        //     const double myeta = 1;
+        //     tjxx += myeta * (L[0]);
+        //     tjyy += myeta * (L[3]);
+        //     tjxy += myeta * 0.5 * (L[1] + L[2]);
+        // }
+
+        // Normally expect something like (T_j - T_i) * dWij but this is not
+        // stable -- take the density-normalized form instead to get
+        // m_i * m_j (T_j / (rho_j ** 2) + T_i / (rho_i ** 2)) * dWij
+        // See Gray 2001 "SPH Elastic Dynamics"
+        const double rhoisq = rhoi * rhoi;
+        const double rhojsq = rhoj * rhoj;
+
+        sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWij[0];
+        sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[1];
+        sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[2];
+
+        sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[0];
+        sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWij[1];
+        sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[2];
+
+        sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[0];
+        sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[1];
+        sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWij[2];
+
+        if (atom->tag[i] == 1) {
+            printf("divsigma j %d = [%17.9g %17.9g %17.9g]\n",
+                    (int)atom->tag[j],
+                    sdotdw[0],
+                    sdotdw[1],
+                    sdotdw[2]
+                  );
+        }
+
+        sdiv[i][0] += sdotdw[0];
+        sdiv[i][1] += sdotdw[1];
+        sdiv[i][2] += sdotdw[2];
 
         if (newton_pair || j < nlocal) {
 
-          sdotdw[0] =  -(stress[j][0] - stress[i][0]) * dWji[0];
-          sdotdw[0] += -(stress[j][3] - stress[i][3]) * dWji[1];
-          sdotdw[0] += -(stress[j][4] - stress[i][4]) * dWji[2];
+            sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWji[0];
+            sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[1];
+            sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[2];
 
-          sdotdw[1] =  -(stress[j][3] - stress[i][3]) * dWji[0];
-          sdotdw[1] += -(stress[j][1] - stress[i][1]) * dWji[1];
-          sdotdw[1] += -(stress[j][5] - stress[i][5]) * dWji[2];
+            sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[0];
+            sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWji[1];
+            sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[2];
 
-          sdotdw[2] =  -(stress[j][4] - stress[i][4]) * dWji[0];
-          sdotdw[2] += -(stress[j][5] - stress[i][5]) * dWji[1];
-          sdotdw[2] += -(stress[j][2] - stress[i][2]) * dWji[2];
+            sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[0];
+            sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
+            sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
 
-          sdiv[j][0] += Voli * sdotdw[0];
-          sdiv[j][1] += Voli * sdotdw[1];
-          sdiv[j][2] += Voli * sdotdw[2];
+          sdiv[j][0] += sdotdw[0];
+          sdiv[j][1] += sdotdw[1];
+          sdiv[j][2] += sdotdw[2];
         }
       }
     }
@@ -215,8 +266,13 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   // double **v = atom->v;
   const double dt = update->dt;
   for (i = 0; i < atom->nlocal; i++) {
+    if (atom->tag[i] == 1) {
+        printf("sdiv[i] = [%17.9g %17.9g %17.9g]\n", sdiv[i][0], sdiv[i][1], sdiv[i][2]);
+        printf("f[i] = [%17.9g %17.9g %17.9g]\n", f[i][0], f[i][1], f[i][2]);
+    }
     f[i][0] += sdiv[i][0];
     f[i][1] += sdiv[i][1];
+    f[i][2] += sdiv[i][2];
 
     // if (x[i][1] > 8.0) {
     //     f[i][1] += sdiv[i][1] - 9.81;
@@ -225,15 +281,14 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     // }
 
     // modify for boundary a bit
-    // const double width = 0.25;
-    // const double y_c = 2.0;
+    const double width = 0.25;
+    const double y_c = 2.0;
 
     // if (1 <= tag[i] && tag[i] <= 200) {
     //     // const double v_init = v[i][1];
     //     // f[i][1] = -v_init / (mass[i] * dt);
     //     v[i][1] = 0;
     // }
-    f[i][2] += sdiv[i][2];
   }
 }
 

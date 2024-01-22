@@ -76,6 +76,8 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   cut = h;
   if (strcmp(arg[4],"quintic") == 0) {
       kernel_style = QUINTIC;
+  } else if (strcmp(arg[4],"cubic") == 0) {
+      kernel_style = CUBIC;
   } else if (strcmp(arg[4],"RK0") == 0) {
       kernel_style = RK0;
   } else if (strcmp(arg[4],"RK1") == 0) {
@@ -309,6 +311,10 @@ void FixRHEO::initial_integrate(int /*vflag*/)
       v[i][0] += dtfm * f[i][0];
       v[i][1] += dtfm * f[i][1];
       v[i][2] += dtfm * f[i][2];
+
+      if (atom->tag[i] == 1) {
+          printf("initial_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+      }
     }
   }
 
@@ -445,6 +451,9 @@ void FixRHEO::final_integrate()
 
       for (a = 0; a < dim; a++) {
         v[i][a] += dtfm * f[i][a];
+        if ((atom->tag[i] == 1) && (a == 0)) {
+            printf("final_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+        }
       }
     }
   }
