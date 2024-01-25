@@ -37,7 +37,6 @@ class ComputeRHEOInterface : public Compute {
   void unpack_reverse_comm(int, int *, double *) override;
   double memory_usage() override;
   void correct_v(double *, double *, int, int);
-  void correct_stress(double *, double *, int, int);
   double correct_rho(int, int);
   void store_forces();
 

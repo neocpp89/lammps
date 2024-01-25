@@ -344,24 +344,6 @@ void ComputeRHEOInterface::unpack_reverse_comm(int n, int *list, double *buf)
 
 /* ---------------------------------------------------------------------- */
 
-void ComputeRHEOInterface::correct_stress(double *vi, double *vj, int i, int j)
-{
-  double wall_prefactor, wall_denom, wall_numer;
-
-  wall_numer = 2.0 * cut * (chi[i] - 0.5);
-  if (wall_numer < 0) wall_numer = 0;
-  wall_denom = 2.0 * cut * (chi[j] - 0.5);
-  if (wall_denom < wall_max) wall_denom = wall_max;
-
-  wall_prefactor = wall_numer / wall_denom;
-
-  vi[0] = (vi[0] - vj[0]) * wall_prefactor + vi[0];
-  vi[1] = (vi[1] - vj[1]) * wall_prefactor + vi[1];
-  vi[2] = (vi[2] - vj[2]) * wall_prefactor + vi[2];
-}
-
-/* ---------------------------------------------------------------------- */
-
 void ComputeRHEOInterface::correct_v(double *vi, double *vj, int i, int j)
 {
   double wall_prefactor, wall_denom, wall_numer;
