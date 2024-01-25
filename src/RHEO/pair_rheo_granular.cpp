@@ -107,6 +107,18 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   int *type = atom->type;
   int *status = atom->status;
 
+  double **fp_store, *chi;
+  if (compute_interface) {
+    fp_store = compute_interface->fp_store;
+    chi = compute_interface->chi;
+
+    for (i = 0; i < atom->nmax; i++) {
+      fp_store[i][0] = 0.0;
+      fp_store[i][1] = 0.0;
+      fp_store[i][2] = 0.0;
+    }
+  }
+
   inum = list->inum;
   ilist = list->ilist;
   numneigh = list->numneigh;
@@ -279,6 +291,12 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     //     v[i][1] = 0;
     // }
     f[i][2] += sdiv[i][2];
+
+    if (compute_interface) {
+      fp_store[i][0] += sdiv[i][0];
+      fp_store[i][1] += sdiv[i][1];
+      fp_store[i][2] += sdiv[i][2];
+    }
   }
 }
 
