@@ -578,8 +578,13 @@ void ComputeRHEOStress::compute_peratom()
     const double density = rho[i];
     const int dim = domain->dimension;
     const double dt = update->dt;
-    // update_one_material_point_stress(T, L, density, dt, dim);
-    update_one_material_point_stress_elastic(T, L, density, dt, dim);
+
+    double rho_pressure = 0;
+    double nup_tau = 0;
+    double tr_t0 = 0;
+    double txxdev = 0;
+    update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+    // update_one_material_point_stress_elastic(T, L, density, dt, dim);
 
     if (atom->tag[i] == 1) {
         printf("txx %17.9g\n", T[VoigtXX]);
