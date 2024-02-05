@@ -57,6 +57,10 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   nmax_store = 0;
   grow_arrays(atom->nmax);
 
+  for (int i = 0; i < nmax_store; i++)
+    for (int a = 0; a < 6; a++)
+      stress[i][a] = 0.0;
+
 }
 
 /* ---------------------------------------------------------------------- */

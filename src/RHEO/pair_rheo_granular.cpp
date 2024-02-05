@@ -79,28 +79,47 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 {
   int i, j, a, b, ii, jj, inum, jnum, itype, jtype, fluidi, fluidj;
   double xtmp, ytmp, ztmp, w, wp;
-  double rhoi, rhoj, Voli, Volj;
+  double rho0i, rho0j, rhoi, rhoj, Voli, Volj;
   double *dWij, *dWji;
-  double dx[3], sdotdw[3];
+  double dx[3], sdotdw[3], vi[3], vj[3];
+
+  double q, mu, fp_prefactor, dfp[3], dv[3], du[3];
 
   int *ilist, *jlist, *numneigh, **firstneigh;
-  double imass, jmass, rsq, r, rinv;
+  double imass, jmass, rsq, r, rinv, drho_damp, cs_ave;
 
   int nlocal = atom->nlocal;
   int newton_pair = force->newton_pair;
   int dim = domain->dimension;
 
+  double hinv = 1.0 / h;
+  double hinv3 = hinv * 3.0;
+
   ev_init(eflag, vflag);
 
+  double **gradv = compute_grad->gradv;
   double **x = atom->x;
   double **v = atom->v;
   double **f = atom->f;
   double *rho = atom->rho;
+  double *drho = atom->drho;
   double *mass = atom->mass;
   double **stress = fix_stress->array_atom;
   double *special_lj = force->special_lj;
   int *type = atom->type;
   int *status = atom->status;
+
+  double **fp_store, *chi;
+  if (compute_interface) {
+    fp_store = compute_interface->fp_store;
+    chi = compute_interface->chi;
+
+    for (i = 0; i < atom->nmax; i++) {
+      fp_store[i][0] = 0.0;
+      fp_store[i][1] = 0.0;
+      fp_store[i][2] = 0.0;
+    }
+  }
 
   inum = list->inum;
   ilist = list->ilist;
@@ -150,14 +169,17 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
         rhoi = rho[i];
         rhoj = rho[j];
+        rho0i = rho[itype];
+        rho0j = rho[jtype];
+        cs_ave = 0.5 * (cs[itype] + cs[jtype]);
         if (interface_flag) {
           if (fluidi && (!fluidj)) {
             rhoj = compute_interface->correct_rho(j, i);
           } else if ((!fluidi) && fluidj) {
             rhoi = compute_interface->correct_rho(i, j);
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0i;
+            rhoj = rho0i;
           }
         }
 
@@ -168,6 +190,27 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         wp = compute_kernel->calc_dw(i, j, dx[0], dx[1], dx[2], r);
         dWij = compute_kernel->dWij;
         dWji = compute_kernel->dWji;
+
+
+            //Interpolate velocities to midpoint and use this difference for artificial viscosity
+            for (a = 0; a < 3; a++) {
+              vi[a] = v[i][a];
+              vj[a] = v[j][a];
+            }
+
+            fp_prefactor = 0;
+            sub3(vi, vj, dv);
+            copy3(dv, du);
+            for (a = 0; a < dim; a++)
+              for (b = 0; b < dim; b++)
+                du[a] -= 0.5 * (gradv[i][a * dim + b] + gradv[j][a * dim + b]) * dx[b];
+
+            mu = dot3(du, dx) * hinv3;
+            mu /= (rsq * hinv3 * hinv3 + EPSILON);
+            mu = MIN(0.0, mu);
+            q = av * (-2.0 * cs_ave * mu + mu * mu);
+            fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
+            scale3(-fp_prefactor, dWij, dfp);
 
         // Add contributions to stress divergence
         // stress is in Voigt form in order: XX, YY, ZZ, XY, XZ, YZ
@@ -237,23 +280,35 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         sdiv[i][1] += sdotdw[1];
         sdiv[i][2] += sdotdw[2];
 
+          f[i][0] += dfp[0];
+          f[i][1] += dfp[1];
+          f[i][2] += dfp[2];
+
+          drho_damp = 2 * rho_damp * (rhoj - rhoi) * rinv * wp;
+          drho[i] -= drho_damp * Volj;
+
         if (newton_pair || j < nlocal) {
+          sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWji[0];
+          sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[1];
+          sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[2];
 
-            sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWji[0];
-            sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[1];
-            sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[2];
+          sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[0];
+          sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWji[1];
+          sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[2];
 
-            sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[0];
-            sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWji[1];
-            sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[2];
-
-            sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[0];
-            sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
-            sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
+          sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[0];
+          sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
+          sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
 
           sdiv[j][0] += sdotdw[0];
           sdiv[j][1] += sdotdw[1];
           sdiv[j][2] += sdotdw[2];
+
+          f[j][0] -= dfp[0];
+          f[j][1] -= dfp[1];
+          f[j][2] -= dfp[2];
+
+          drho[j] += drho_damp * Voli;
         }
       }
     }
@@ -289,6 +344,12 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     //     // f[i][1] = -v_init / (mass[i] * dt);
     //     v[i][1] = 0;
     // }
+
+    if (compute_interface) {
+      fp_store[i][0] += sdiv[i][0];
+      fp_store[i][1] += sdiv[i][1];
+      fp_store[i][2] += sdiv[i][2];
+    }
   }
 }
 
@@ -315,9 +376,25 @@ void PairRHEOGranular::allocate()
 
 void PairRHEOGranular::settings(int narg, char **arg)
 {
-  if (narg != 1) error->all(FLERR,"Illegal pair_style command");
+  if (narg < 1) error->all(FLERR,"Illegal pair_style command");
 
   h = utils::numeric(FLERR,arg[0],false,lmp);
+
+  av = 0.0;
+  rho_damp = 0.0;
+  int iarg = 1;
+  while (iarg < narg) {
+    if (strcmp(arg[iarg], "rho/damp") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      rho_damp = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      iarg++;
+    } else if (strcmp(arg[iarg], "artificial/visc") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR,"Illegal pair_style command");
+      av = utils::numeric(FLERR,arg[iarg + 1],false,lmp);
+      iarg++;
+    } else error->all(FLERR,"Illegal pair_style command, {}", arg[iarg]);
+    iarg++;
+  }
 }
 
 /* ----------------------------------------------------------------------
@@ -367,6 +444,12 @@ void PairRHEOGranular::setup()
   compute_interface = fix_rheo->compute_interface;
   interface_flag = fix_rheo->interface_flag;
   rho0 = fix_rheo->rho0;
+  csq = fix_rheo->csq;
+
+  int n = atom->ntypes;
+  memory->create(cs, n + 1, "rheo:cs");
+  for (int i = 1; i <= n; i++)
+    cs[i] = sqrt(csq[i]);
 
   // TODO: another Law of Demeter violation, figure out how to fix
   dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;

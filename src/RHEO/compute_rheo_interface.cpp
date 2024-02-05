@@ -25,6 +25,8 @@
 #include "error.h"
 #include "force.h"
 #include "fix_rheo.h"
+#include "fix_rheo_pressure.h"
+#include "fix_rheo_stress.h"
 #include "memory.h"
 #include "modify.h"
 #include "neighbor.h"
@@ -41,8 +43,8 @@ static constexpr double EPSILON = 1e-1;
 /* ---------------------------------------------------------------------- */
 
 ComputeRHEOInterface::ComputeRHEOInterface(LAMMPS *lmp, int narg, char **arg) :
-  Compute(lmp, narg, arg), fix_rheo(nullptr), compute_kernel(nullptr), fp_store(nullptr),
-  norm(nullptr), normwf(nullptr), chi(nullptr), id_fix_pa(nullptr)
+  Compute(lmp, narg, arg), fix_rheo(nullptr), fix_stress(nullptr), compute_kernel(nullptr), fp_store(nullptr),
+  rho0(nullptr), norm(nullptr), normwf(nullptr), chi(nullptr), id_fix_pa(nullptr)
 {
   if (narg != 3) error->all(FLERR,"Illegal compute rheo/interface command");
 
@@ -86,10 +88,22 @@ void ComputeRHEOInterface::init()
   compute_kernel = fix_rheo->compute_kernel;
   rho0 = fix_rheo->rho0;
   cut = fix_rheo->cut;
-  csq = fix_rheo->csq;
-  csq_inv = 1.0 / csq;
   cutsq = cut * cut;
   wall_max = sqrt(3.0) / 12.0 * cut;
+
+  auto fixes = modify->get_fix_by_style("rheo/pressure");
+  fix_pressure = dynamic_cast<FixRHEOPressure *>(fixes[0]);
+
+  // Currently only allow one instance of fix rheo/pressure
+  stress_flag = 0;
+  fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() != 0) {
+    fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+    stress_flag = 1;
+    comm_forward = 8;
+    comm_reverse = 10;
+  }
+
 
   neighbor->add_request(this, NeighConst::REQ_DEFAULT);
 }
@@ -105,8 +119,8 @@ void ComputeRHEOInterface::init_list(int /*id*/, NeighList *ptr)
 
 void ComputeRHEOInterface::compute_peratom()
 {
-  int i, j, ii, jj, jnum, itype, jtype, fluidi, fluidj, status_match;
-  double xtmp, ytmp, ztmp, delx, dely, delz, rsq, w, dot;
+  int a, i, j, ii, jj, jnum, itype, jtype, fluidi, fluidj, status_match;
+  double xtmp, ytmp, ztmp, delx, dely, delz, rsq, w, dot, dx[3];
 
   int inum, *ilist, *jlist, *numneigh, **firstneigh;
   int nlocal = atom->nlocal;
@@ -117,6 +131,7 @@ void ComputeRHEOInterface::compute_peratom()
   int newton = force->newton;
   int *status = atom->status;
   double *rho = atom->rho;
+  double **stress = fix_stress->array_atom;
 
   inum = list->inum;
   ilist = list->ilist;
@@ -132,6 +147,8 @@ void ComputeRHEOInterface::compute_peratom()
 
   for (i = 0; i < nall; i++) {
     if (status[i] & PHASECHECK) rho[i] = 0.0;
+    if (status[i] & PHASECHECK)
+      for (a = 0; a < 6; a++) stress[i][a] = 0.0;
     normwf[i] = 0.0;
     norm[i] = 0.0;
     chi[i] = 0.0;
@@ -154,6 +171,9 @@ void ComputeRHEOInterface::compute_peratom()
       delx = xtmp - x[j][0];
       dely = ytmp - x[j][1];
       delz = ztmp - x[j][2];
+      dx[0] = delx;
+      dx[1] = dely;
+      dx[2] = delz;
       rsq = delx * delx + dely * dely + delz * delz;
 
       if (rsq < cutsq) {
@@ -174,8 +194,13 @@ void ComputeRHEOInterface::compute_peratom()
             dot += (-fp_store[j][1] + fp_store[i][1]) * dely;
             dot += (-fp_store[j][2] + fp_store[i][2]) * delz;
 
-            rho[i] += w * (csq * (rho[j] - rho0) - rho[j] * dot);
+            rho[i] += w * (fix_pressure->calc_pressure(rho[j], jtype) - rho[j] * dot);
             normwf[i] += w;
+
+            for (a = 0; a < 6; a++)
+              stress[i][a] += stress[j][a] * w;
+            for (a = 0; a < 3; a++)
+              stress[i][a] += (fp_store[j][a] - fp_store[i][a]) * dx[a] * w;
           }
         }
 
@@ -189,8 +214,13 @@ void ComputeRHEOInterface::compute_peratom()
               dot += (-fp_store[i][1] + fp_store[j][1]) * dely;
               dot += (-fp_store[i][2] + fp_store[j][2]) * delz;
 
-              rho[j] += w * (csq * (rho[i] - rho0) + rho[i] * dot);
+              rho[j] += w * (fix_pressure->calc_pressure(rho[i], itype) + rho[i] * dot);
               normwf[j] += w;
+
+              for (a = 0; a < 6; a++)
+              stress[j][a] += stress[i][a] * w;
+            for (a = 0; a < 3; a++)
+              stress[j][a] -= (fp_store[i][a] - fp_store[j][a]) * dx[a] * w;
             }
           }
         }
@@ -207,15 +237,15 @@ void ComputeRHEOInterface::compute_peratom()
     if (status[i] & PHASECHECK) {
       if (normwf[i] != 0.0) {
         // Stores rho for solid particles 1+Pw in Adami Adams 2012
-        rho[i] = MAX(EPSILON, rho0 + (rho[i] / normwf[i]) * csq_inv);
+        rho[i] = MAX(EPSILON, fix_pressure->calc_rho(rho[i] / normwf[i], type[i]));
       } else {
-        rho[i] = rho0;
+        rho[i] = rho0[itype];
       }
     }
   }
 
   comm_stage = 1;
-  comm_forward = 2;
+  comm_forward = 8;
   comm->forward_comm(this);
 }
 
@@ -223,9 +253,10 @@ void ComputeRHEOInterface::compute_peratom()
 
 int ComputeRHEOInterface::pack_forward_comm(int n, int *list, double *buf, int /*pbc_flag*/, int * /*pbc*/)
 {
-  int i,j,k,m;
+  int a,i,j,k,m;
   m = 0;
   double *rho = atom->rho;
+  double **stress = fix_stress->array_atom;
 
   for (i = 0; i < n; i++) {
     j = list[i];
@@ -236,6 +267,7 @@ int ComputeRHEOInterface::pack_forward_comm(int n, int *list, double *buf, int /
     } else {
       buf[m++] = chi[j];
       buf[m++] = rho[j];
+      for (a = 0; a < 6; a++) buf[m++] = stress[j][a];
     }
   }
   return m;
@@ -245,8 +277,10 @@ int ComputeRHEOInterface::pack_forward_comm(int n, int *list, double *buf, int /
 
 void ComputeRHEOInterface::unpack_forward_comm(int n, int first, double *buf)
 {
-  int i, k, m, last;
+  int a, i, k, m, last;
   double *rho = atom->rho;
+  double **stress = fix_stress->array_atom;
+
   m = 0;
   last = first + n;
   for (i = first; i < last; i++) {
@@ -257,6 +291,7 @@ void ComputeRHEOInterface::unpack_forward_comm(int n, int first, double *buf)
     } else {
       chi[i] = buf[m++];
       rho[i] = buf[m++];
+      for (a = 0; a < 6; a++) stress[i][a] = buf[m++];
     }
   }
 }
@@ -265,8 +300,9 @@ void ComputeRHEOInterface::unpack_forward_comm(int n, int first, double *buf)
 
 int ComputeRHEOInterface::pack_reverse_comm(int n, int first, double *buf)
 {
-  int i,k,m,last;
+  int a,i,k,m,last;
   double *rho = atom->rho;
+  double **stress = fix_stress->array_atom;
 
   m = 0;
   last = first + n;
@@ -275,6 +311,7 @@ int ComputeRHEOInterface::pack_reverse_comm(int n, int first, double *buf)
     buf[m++] = chi[i];
     buf[m++] = normwf[i];
     buf[m++] = rho[i];
+    for (a = 0; a < 6; a++) buf[m++] = stress[i][a];
   }
   return m;
 }
@@ -283,9 +320,11 @@ int ComputeRHEOInterface::pack_reverse_comm(int n, int first, double *buf)
 
 void ComputeRHEOInterface::unpack_reverse_comm(int n, int *list, double *buf)
 {
-  int i,k,j,m;
+  int a, i, k, j, m;
   double *rho = atom->rho;
   int *status = atom->status;
+  double **stress = fix_stress->array_atom;
+
   m = 0;
   for (i = 0; i < n; i++) {
     j = list[i];
@@ -294,9 +333,11 @@ void ComputeRHEOInterface::unpack_reverse_comm(int n, int *list, double *buf)
     if (status[j] & PHASECHECK){
       normwf[j] += buf[m++];
       rho[j] += buf[m++];
+      for (a = 0; a < 6; a++) stress[j][a] += buf[m++];
     } else {
       m++;
       m++;
+      for (a = 0; a < 6; a++) m++;
     }
   }
 }

@@ -14,7 +14,7 @@
 
 /* ----------------------------------------------------------------------
    Contributing authors:
-   Joel Clemmer (SNL), Thomas O'Connor (CMU), Eric Palermo (CMU)
+   Joel Clemmer (SNL)
 ----------------------------------------------------------------------- */
 
 #include "compute_rheo_property_atom.h"
@@ -29,6 +29,7 @@
 #include "domain.h"
 #include "error.h"
 #include "fix_rheo.h"
+#include "fix_rheo_pressure.h"
 #include "fix_rheo_thermal.h"
 #include "memory.h"
 #include "modify.h"
@@ -44,7 +45,7 @@ using namespace RHEO_NS;
 /* ---------------------------------------------------------------------- */
 
 ComputeRHEOPropertyAtom::ComputeRHEOPropertyAtom(LAMMPS *lmp, int narg, char **arg) :
-  Compute(lmp, narg, arg), fix_rheo(nullptr), fix_thermal(nullptr),  compute_interface(nullptr),
+  Compute(lmp, narg, arg), fix_rheo(nullptr), fix_pressure(nullptr), fix_thermal(nullptr),  compute_interface(nullptr),
   compute_kernel(nullptr), compute_surface(nullptr), compute_vshift(nullptr), compute_grad(nullptr),
   avec_index(nullptr), pack_choice(nullptr), col_index(nullptr)
 {
@@ -55,7 +56,7 @@ ComputeRHEOPropertyAtom::ComputeRHEOPropertyAtom(LAMMPS *lmp, int narg, char **a
   if (nvalues == 1) size_peratom_cols = 0;
   else size_peratom_cols = nvalues;
 
-  thermal_flag = interface_flag = surface_flag = shift_flag = 0;
+  pressure_flag = thermal_flag = interface_flag = surface_flag = shift_flag = 0;
 
   // parse input values
   // customize a new keyword by adding to if statement
@@ -90,6 +91,9 @@ ComputeRHEOPropertyAtom::ComputeRHEOPropertyAtom(LAMMPS *lmp, int narg, char **a
       col_index[i] = get_vector_index(arg[iarg]);
     } else if (strcmp(arg[iarg],"coordination") == 0) {
       pack_choice[i] = &ComputeRHEOPropertyAtom::pack_coordination;
+    } else if (strcmp(arg[iarg],"pressure") == 0) {
+      pressure_flag = 1;
+      pack_choice[i] = &ComputeRHEOPropertyAtom::pack_pressure;
     } else if (strcmp(arg[iarg],"cv") == 0) {
       thermal_flag = 1;
       pack_choice[i] = &ComputeRHEOPropertyAtom::pack_cv;
@@ -100,6 +104,14 @@ ComputeRHEOPropertyAtom::ComputeRHEOPropertyAtom(LAMMPS *lmp, int narg, char **a
     } else if (utils::strmatch(arg[iarg], "^grad/v")) {
       pack_choice[i] = &ComputeRHEOPropertyAtom::pack_gradv;
       col_index[i] = get_tensor_index(arg[iarg]);
+    } else if (strcmp(arg[iarg], "energy") == 0) {
+      avec_index[i] = atom->avec->property_atom("esph");
+      if (avec_index[i] < 0)
+        error->all(FLERR,
+                   "Invalid keyword {} for atom style {} in compute rheo/property/atom command ",
+                   arg[iarg], atom->get_style());
+      pack_choice[i] = &ComputeRHEOPropertyAtom::pack_atom_style;
+      thermal_flag = 1;
     } else {
       avec_index[i] = atom->avec->property_atom(arg[iarg]);
       if (avec_index[i] < 0)
@@ -154,6 +166,11 @@ void ComputeRHEOPropertyAtom::init()
   if (thermal_flag) {
     fixes = modify->get_fix_by_style("rheo/thermal");
     fix_thermal = dynamic_cast<FixRHEOThermal *>(fixes[0]);
+  }
+
+  if (pressure_flag) {
+    fixes = modify->get_fix_by_style("rheo/pressure");
+    fix_pressure = dynamic_cast<FixRHEOPressure *>(fixes[0]);
   }
 }
 
@@ -335,7 +352,23 @@ void ComputeRHEOPropertyAtom::pack_cv(int n)
   int nlocal = atom->nlocal;
 
   for (int i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) buf[n] = fix_thermal->calc_cv(i);
+    if (mask[i] & groupbit) buf[n] = fix_thermal->calc_cv(i, type[i]);
+    else buf[n] = 0.0;
+    n += nvalues;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ComputeRHEOPropertyAtom::pack_pressure(int n)
+{
+  int *type = atom->type;
+  int *mask = atom->mask;
+  double *rho = atom->rho;
+  int nlocal = atom->nlocal;
+
+  for (int i = 0; i < nlocal; i++) {
+    if (mask[i] & groupbit) buf[n] = fix_pressure->calc_pressure(rho[i], type[i]);
     else buf[n] = 0.0;
     n += nvalues;
   }

@@ -42,7 +42,7 @@ static constexpr double EPSILON = 1e-10;
 /* ---------------------------------------------------------------------- */
 
 ComputeRHEOSurface::ComputeRHEOSurface(LAMMPS *lmp, int narg, char **arg) :
-  Compute(lmp, narg, arg), fix_rheo(nullptr), list(nullptr), compute_kernel(nullptr), compute_interface(nullptr),
+  Compute(lmp, narg, arg), fix_rheo(nullptr), list(nullptr), rho0(nullptr), compute_kernel(nullptr), compute_interface(nullptr),
   B(nullptr), gradC(nullptr), nsurface(nullptr), divr(nullptr), rsurface(nullptr)
 {
   if (narg != 3) error->all(FLERR,"Illegal compute RHEO/SURFACE command");
@@ -87,27 +87,26 @@ void ComputeRHEOSurface::init()
 
   cutsq = cut * cut;
 
-  // Create rsurface, divr, nsurface arrays if they don't already exist
-  // Create a custom atom property so it works with compute property/atom
-  // Do not create grow callback as there's no reason to copy/exchange data
-  // Manually grow if nmax_store exceeded
+  // Create rsurface, divr, nsurface arrays as custom atom properties,
+  //   can print with compute property/atom
+  //   no grow callback as there's no reason to copy/exchange data, manually grow
   // For B and gradC, create a local array since they are unlikely to be printed
 
+  int dim = domain->dimension;
   int tmp1, tmp2;
-  int index = atom->find_custom("rheo_divr", tmp1, tmp2);
-  if (index == -1)  index = atom->add_custom("rheo_divr", 1, 0);
-  divr = atom->dvector[index];
+  index_divr = atom->find_custom("rheo_divr", tmp1, tmp2);
+  if (index_divr == -1) index_divr = atom->add_custom("rheo_divr", 1, 0);
+  divr = atom->dvector[index_divr];
 
-  index = atom->find_custom("rheo_rsurface", tmp1, tmp2);
-  if (index == -1)  index = atom->add_custom("rheo_rsurface", 1, 0);
-  rsurface = atom->dvector[index];
+  index_rsurf = atom->find_custom("rheo_rsurface", tmp1, tmp2);
+  if (index_rsurf == -1) index_rsurf = atom->add_custom("rheo_rsurface", 1, 0);
+  rsurface = atom->dvector[index_rsurf];
 
-  index = atom->find_custom("rheo_nsurface", tmp1, tmp2);
-  if (index == -1)  index = atom->add_custom("rheo_nsurface", 1, 3);
-  nsurface = atom->darray[index];
+  index_nsurf = atom->find_custom("rheo_nsurface", tmp1, tmp2);
+  if (index_nsurf == -1) index_nsurf = atom->add_custom("rheo_nsurface", 1, dim);
+  nsurface = atom->darray[index_nsurf];
 
   nmax_store = atom->nmax;
-  int dim = domain->dimension;
   memory->create(B, nmax_store, dim * dim, "rheo/surface:B");
   memory->create(gradC, nmax_store, dim * dim, "rheo/surface:gradC");
 
@@ -148,32 +147,17 @@ void ComputeRHEOSurface::compute_peratom()
   numneigh = list->numneigh;
   firstneigh = list->firstneigh;
 
-  int nmax = atom->nmax;
-  if (nmax_store <= nmax) {
-    memory->grow(divr, nmax, "atom:rheo_divr");
-    memory->grow(rsurface, nmax, "atom:rheo_rsurface");
-    memory->grow(nsurface, nmax, 3, "atom:rheo_nsurface");
+  // Grow and zero arrays
+  if (nmax_store <= atom->nmax)
+    grow_arrays(atom->nmax);
 
-    memory->grow(B, nmax, dim * dim, "rheo/surface:B");
-    memory->grow(gradC, nmax, dim * dim, "rheo/surface:gradC");
+  size_t nbytes = nmax_store * sizeof(double);
+  memset(&divr[0], 0, nbytes);
+  memset(&rsurface[0], 0, nbytes);
+  memset(&nsurface[0][0], 0, dim * nbytes);
+  memset(&gradC[0][0], 0, dim * dim * nbytes);
+  memset(&B[0][0], 0, dim * dim * nbytes);
 
-    nmax_store = atom->nmax;
-  }
-
-  int nall = nlocal + atom->nghost;
-  for (i = 0; i < nall; i++) {
-    for (a = 0; a < dim; a++) {
-      for (b = 0; b < dim; b++) {
-        B[i][a * dim + b] = 0.0;
-        gradC[i][a * dim + b] = 0.0;
-      }
-      nsurface[i][a] = 0.0;
-    }
-    divr[i] = 0.0;
-
-    // Remove surface settings
-    status[i] &= SURFACEMASK;
-  }
 
   // loop over neighbors to calculate the average orientation of neighbors
   for (ii = 0; ii < inum; ii++) {
@@ -210,8 +194,8 @@ void ComputeRHEOSurface::compute_peratom()
           } else if ((!fluidi) && fluidj) {
             rhoi = compute_interface->correct_rho(i, j);
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0[itype];
+            rhoj = rho0[jtype];
           }
         }
 
@@ -220,7 +204,7 @@ void ComputeRHEOSurface::compute_peratom()
 
         wp = compute_kernel->calc_dw_quintic(i, j, dx[0], dx[1], dx[2], sqrt(rsq), dWij, dWji);
 
-        for (a = 0; a < dim; a++){
+        for (a = 0; a < dim; a++) {
           divr[i] -= dWij[a] * dx[a] * Volj;
           gradC[i][a] += dWij[a] * Volj;
         }
@@ -257,34 +241,31 @@ void ComputeRHEOSurface::compute_peratom()
     }
   }
 
-  // Find the free-surface
-  if (threshold_style == DIVR) {
-    for (i = 0; i < nall; i++) {
-      if (mask[i] & groupbit) {
+  // Remove surface settings and assign new values
+  int nall = nlocal + atom->nghost;
+  int test;
+
+  for (i = 0; i < nall; i++) {
+    status[i] &= SURFACEMASK;
+    if (mask[i] & groupbit) {
+      if (threshold_style == DIVR)
+        test = divr[i] < threshold_divr;
+      else
+        test = coordination[i] < threshold_z;
+
+      if (test) {
+        if (coordination[i] < threshold_splash)
+          status[i] |= STATUS_SPLASH;
+        else
+          status[i] |= STATUS_SURFACE;
+        rsurface[i] = 0.0;
+      } else {
         status[i] |= STATUS_BULK;
         rsurface[i] = cut;
-        if (divr[i] < threshold_divr) {
-          status[i] |= STATUS_SURFACE;
-          rsurface[i] = 0.0;
-          if (coordination[i] < threshold_splash)
-            status[i] |= STATUS_SPLASH;
-        }
-      }
-    }
-  } else {
-    for (i = 0; i < nall; i++) {
-      if (mask[i] & groupbit) {
-        status[i] |= STATUS_BULK;
-        rsurface[i] = cut;
-        if (coordination[i] < threshold_z) {
-          status[i] |= STATUS_SURFACE;
-          rsurface[i] = 0.0;
-          if (coordination[i] < threshold_splash)
-            status[i] |= STATUS_SPLASH;
-        }
       }
     }
   }
+
 
   for (ii = 0; ii < inum; ii++) {
     i = ilist[ii];
@@ -309,7 +290,8 @@ void ComputeRHEOSurface::compute_peratom()
           status[i] |= STATUS_LAYER;
         }
 
-        if (status[j] & STATUS_SURFACE) rsurface[i] = MIN(rsurface[i], sqrt(rsq));
+        if (status[j] & STATUS_SURFACE)
+          rsurface[i] = MIN(rsurface[i], sqrt(rsq));
 
 
         if (j < nlocal || newton) {
@@ -318,7 +300,8 @@ void ComputeRHEOSurface::compute_peratom()
             status[j] |= STATUS_LAYER;
           }
 
-          if (status[i] & STATUS_SURFACE) rsurface[j] = MIN(rsurface[j], sqrt(rsq));
+          if (status[i] & STATUS_SURFACE)
+            rsurface[j] = MIN(rsurface[j], sqrt(rsq));
         }
       }
     }
@@ -363,7 +346,8 @@ void ComputeRHEOSurface::unpack_reverse_comm(int n, int *list, double *buf)
   int i,a,b,k,j,m;
   int dim = domain->dimension;
   int *status = atom->status;
-  int temp;
+  int tmp1;
+  double tmp2;
 
   m = 0;
   for (i = 0; i < n; i++) {
@@ -374,12 +358,13 @@ void ComputeRHEOSurface::unpack_reverse_comm(int n, int *list, double *buf)
         for (b = 0; b < dim; b ++)
           gradC[j][a * dim + b] += buf[m++];
     } else if (comm_stage == 1) {
-
-      temp = (int) buf[m++];
-      if ((status[j] & STATUS_BULK) && (temp & STATUS_LAYER))
-        status[j] = temp;
-
-      rsurface[j] = MIN(rsurface[j], buf[m++]);
+      tmp1 = (int) buf[m++];
+      if ((status[j] & STATUS_BULK) && (tmp1 & STATUS_LAYER)) {
+        status[j] &= SURFACEMASK;
+        status[j] |= STATUS_LAYER;
+      }
+      tmp2 = buf[m++];
+      rsurface[j] = MIN(rsurface[j], tmp2);
     }
   }
 }
@@ -423,4 +408,26 @@ void ComputeRHEOSurface::unpack_forward_comm(int n, int first, double *buf)
       rsurface[i] = buf[m++];
     }
   }
+}
+
+/* ---------------------------------------------------------------------- */
+
+void ComputeRHEOSurface::grow_arrays(int nmax)
+{
+  int dim = domain->dimension;
+
+  // Grow atom variables and reassign pointers
+  memory->grow(atom->dvector[index_divr], nmax, "atom:rheo_divr");
+  memory->grow(atom->dvector[index_rsurf], nmax, "atom:rheo_rsurface");
+  memory->grow(atom->darray[index_nsurf], nmax, dim, "atom:rheo_nsurface");
+
+  divr = atom->dvector[index_divr];
+  rsurface = atom->dvector[index_rsurf];
+  nsurface = atom->darray[index_nsurf];
+
+  // Grow local variables
+  memory->grow(B, nmax, dim * dim, "rheo/surface:B");
+  memory->grow(gradC, nmax, dim * dim, "rheo/surface:gradC");
+
+  nmax_store = atom->nmax;
 }

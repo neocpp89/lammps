@@ -44,17 +44,17 @@ enum{COMMGRAD, COMMFIELD};
 /* ---------------------------------------------------------------------- */
 
 ComputeRHEOGrad::ComputeRHEOGrad(LAMMPS *lmp, int narg, char **arg) :
-  Compute(lmp, narg, arg), fix_rheo(nullptr), list(nullptr), compute_interface(nullptr), compute_kernel(nullptr),
-  gradv(nullptr), gradr(nullptr), gradt(nullptr), gradn(nullptr)
+  Compute(lmp, narg, arg), fix_rheo(nullptr), list(nullptr), rho0(nullptr), compute_interface(nullptr), compute_kernel(nullptr),
+  gradv(nullptr), gradr(nullptr), grade(nullptr), gradn(nullptr)
 {
   if (narg < 4) error->all(FLERR,"Illegal compute rheo/grad command");
 
-  velocity_flag = temperature_flag = rho_flag = eta_flag = 0;
+  velocity_flag = energy_flag = rho_flag = eta_flag = 0;
   for (int iarg = 3; iarg < narg; iarg++) {
-    if (strcmp(arg[iarg],"velocity") == 0) velocity_flag = 1;
-    else if (strcmp(arg[iarg],"rho") == 0) rho_flag = 1;
-    else if (strcmp(arg[iarg],"temperature") == 0) temperature_flag = 1;
-    else if (strcmp(arg[iarg],"viscosity") == 0) eta_flag = 1;
+    if (strcmp(arg[iarg], "velocity") == 0) velocity_flag = 1;
+    else if (strcmp(arg[iarg], "rho") == 0) rho_flag = 1;
+    else if (strcmp(arg[iarg], "energy") == 0) energy_flag = 1;
+    else if (strcmp(arg[iarg], "viscosity") == 0) eta_flag = 1;
     else error->all(FLERR, "Illegal compute rheo/grad command, {}", arg[iarg]);
   }
 
@@ -75,7 +75,7 @@ ComputeRHEOGrad::ComputeRHEOGrad(LAMMPS *lmp, int narg, char **arg) :
     comm_reverse += dim;
   }
 
-  if (temperature_flag) {
+  if (energy_flag) {
     ncomm_grad += dim;
     ncomm_field += 1;
     comm_reverse += dim;
@@ -99,7 +99,7 @@ ComputeRHEOGrad::~ComputeRHEOGrad()
 {
   memory->destroy(gradv);
   memory->destroy(gradr);
-  memory->destroy(gradt);
+  memory->destroy(grade);
   memory->destroy(gradn);
 }
 
@@ -133,7 +133,7 @@ void ComputeRHEOGrad::compute_peratom()
   int i, j, k, ii, jj, jnum, itype, jtype, a, b, fluidi, fluidj;
   double xtmp, ytmp, ztmp, delx, dely, delz;
   double rsq, imass, jmass;
-  double rhoi, rhoj, Voli, Volj, drho, dT, deta;
+  double rhoi, rhoj, Voli, Volj, drho, de, deta;
   double vi[3], vj[3], vij[3];
   double wp, *dWij, *dWji;
 
@@ -144,7 +144,7 @@ void ComputeRHEOGrad::compute_peratom()
   double **x = atom->x;
   double **v = atom->v;
   double *rho = atom->rho;
-  double *temperature = atom->temperature;
+  double *energy = atom->esph;
   double *viscosity = atom->viscosity;
   int *status = atom->status;
   int *type = atom->type;
@@ -169,9 +169,9 @@ void ComputeRHEOGrad::compute_peratom()
       for (k = 0; k < dim; k++)
         gradr[i][k] = 0.0;
     }
-    if (temperature_flag) {
+    if (energy_flag) {
       for (k = 0; k < dim; k++)
-        gradt[i][k] = 0.0;
+        grade[i][k] = 0.0;
     }
     if (eta_flag) {
       for (k = 0; k < dim; k++)
@@ -233,8 +233,8 @@ void ComputeRHEOGrad::compute_peratom()
             //compute_interface->correct_v(vi, vj, i, j);
             rhoi = compute_interface->correct_rho(i, j);
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0[itype];
+            rhoj = rho0[jtype];
           }
         }
 
@@ -246,7 +246,7 @@ void ComputeRHEOGrad::compute_peratom()
         vij[2] = vi[2] - vj[2];
 
         if (rho_flag) drho = rhoi - rhoj;
-        if (temperature_flag) dT = temperature[i] - temperature[j];
+        if (energy_flag) de = energy[i] - energy[j];
         if (eta_flag) deta = viscosity[i] - viscosity[j];
 
         wp = compute_kernel->calc_dw(i, j, delx, dely, delz, sqrt(rsq));
@@ -262,8 +262,8 @@ void ComputeRHEOGrad::compute_peratom()
           if (rho_flag) // P,x  P,y  P,z
             gradr[i][a] -= drho * Volj * dWij[a];
 
-          if (temperature_flag) // T,x  T,y  T,z
-            gradt[i][a] -= dT * Volj * dWij[a];
+          if (energy_flag) // e,x  e,y  e,z
+            grade[i][a] -= de * Volj * dWij[a];
 
           if (eta_flag) // n,x  n,y  n,z
             gradn[i][a] -= deta * Volj * dWij[a];
@@ -289,8 +289,8 @@ void ComputeRHEOGrad::compute_peratom()
             if (rho_flag) // P,x  P,y  P,z
               gradr[j][a] += drho * Voli * dWji[a];
 
-            if (temperature_flag) // T,x  T,y  T,z
-              gradt[j][a] += dT * Voli * dWji[a];
+            if (energy_flag) // e,x  e,y  e,z
+              grade[j][a] += de * Voli * dWji[a];
 
             if (eta_flag) // n,x  n,y  n,z
               gradn[j][a] += deta * Voli * dWji[a];
@@ -331,7 +331,7 @@ int ComputeRHEOGrad::pack_forward_comm(int n, int *list, double *buf,
   int i,j,k,m;
   int *mask = atom->mask;
   double *rho = atom->rho;
-  double *temperature = atom->temperature;
+  double *energy = atom->esph;
   double **v = atom->v;
   int dim = domain->dimension;
   double *h_rate = domain->h_rate;
@@ -358,9 +358,9 @@ int ComputeRHEOGrad::pack_forward_comm(int n, int *list, double *buf,
         for (k = 0; k < dim; k++)
           buf[m++] = gradr[j][k];
 
-      if (temperature_flag)
+      if (energy_flag)
         for (k = 0; k < dim; k++)
-          buf[m++] = gradt[j][k];
+          buf[m++] = grade[j][k];
 
       if (eta_flag)
         for (k = 0; k < dim; k++)
@@ -378,13 +378,11 @@ int ComputeRHEOGrad::pack_forward_comm(int n, int *list, double *buf,
         }
       }
 
-
-
       if (rho_flag)
         buf[m++] = rho[j];
 
-      if (temperature_flag)
-        buf[m++] = temperature[j];
+      if (energy_flag)
+        buf[m++] = energy[j];
     }
   }
   return m;
@@ -396,8 +394,7 @@ void ComputeRHEOGrad::unpack_forward_comm(int n, int first, double *buf)
 {
   int i, k, m, last;
   double *rho = atom->rho;
-  double *temperature = atom->temperature;
-  double **v = atom->v;
+  double *energy = atom->esph;  double **v = atom->v;
   int dim = domain->dimension;
 
   m = 0;
@@ -412,9 +409,9 @@ void ComputeRHEOGrad::unpack_forward_comm(int n, int first, double *buf)
         for (k = 0; k < dim; k++)
           gradr[i][k] = buf[m++];
 
-      if (temperature_flag)
+      if (energy_flag)
         for (k = 0; k < dim; k++)
-          gradt[i][k] = buf[m++];
+          grade[i][k] = buf[m++];
 
       if (eta_flag)
         for (k = 0; k < dim; k++)
@@ -428,8 +425,8 @@ void ComputeRHEOGrad::unpack_forward_comm(int n, int first, double *buf)
       if (rho_flag)
         rho[i] = buf[m++];
 
-      if (temperature_flag)
-        temperature[i] = buf[m++];
+      if (energy_flag)
+        energy[i] = buf[m++];
     }
   }
 }
@@ -452,9 +449,9 @@ int ComputeRHEOGrad::pack_reverse_comm(int n, int first, double *buf)
       for (k = 0; k < dim; k++)
         buf[m++] = gradr[i][k];
 
-    if (temperature_flag)
+    if (energy_flag)
       for (k = 0; k < dim; k++)
-        buf[m++] = gradt[i][k];
+        buf[m++] = grade[i][k];
 
     if (eta_flag)
       for (k = 0; k < dim; k++)
@@ -481,9 +478,9 @@ void ComputeRHEOGrad::unpack_reverse_comm(int n, int *list, double *buf)
       for (k = 0; k < dim; k++)
         gradr[j][k] += buf[m++];
 
-    if (temperature_flag)
+    if (energy_flag)
       for (k = 0; k < dim; k++)
-        gradt[j][k] += buf[m++];
+        grade[j][k] += buf[m++];
 
     if (eta_flag)
       for (k = 0; k < dim; k++)
@@ -502,8 +499,8 @@ void ComputeRHEOGrad::grow_arrays(int nmax)
   if (rho_flag)
     memory->grow(gradr, nmax, dim, "rheo:grad_rho");
 
-  if (temperature_flag)
-    memory->grow(gradt, nmax, dim, "rheo:grad_temp");
+  if (energy_flag)
+    memory->grow(grade, nmax, dim, "rheo:grad_energy");
 
   if (eta_flag)
     memory->grow(gradn, nmax, dim, "rheo:grad_eta");
@@ -523,7 +520,7 @@ double ComputeRHEOGrad::memory_usage()
   if (rho_flag)
     bytes = (size_t) nmax_store * dim * sizeof(double);
 
-  if (temperature_flag)
+  if (energy_flag)
     bytes = (size_t) nmax_store * dim * sizeof(double);
 
   if (eta_flag)
