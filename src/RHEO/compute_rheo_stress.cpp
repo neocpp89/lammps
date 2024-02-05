@@ -437,6 +437,7 @@ void ComputeRHEOStress::update_one_material_point_stress(double *ptxxdev, double
         accumulate(T, T0_tr);
         // *ptxxdev = T0_tr[Full3XX];
     } else {
+        printf("p_tr: %.17g, density_flag: %d\n", p_tr, (int)density_flag);
         error->all(FLERR,"Unhandled stress state detected.");
         nup_tau = 0;
     }

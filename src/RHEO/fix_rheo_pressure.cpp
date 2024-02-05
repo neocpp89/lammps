@@ -136,7 +136,7 @@ void FixRHEOPressure::init()
   int n = atom->ntypes;
   memory->create(csqinv, n + 1, "rheo:rho0inv");
   memory->create(rho0inv, n + 1, "rheo:rho0inv");
-  for (int i = 0; i <= n; i++) {
+  for (int i = 1; i <= n; i++) {
     csqinv[i] = 1.0 / csq[i];
     rho0inv[i] = 1.0 / rho0[i];
   }

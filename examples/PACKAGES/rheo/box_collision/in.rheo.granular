@@ -83,9 +83,9 @@ pair_coeff         * *
 
 # ------ Fixes & computes ------ #
 
-fix                1 all rheo ${cut} cubic 32 surface/detection coordination 80 10 density ${rho0}
-fix                2 all rheo/viscosity constant ${eta}
-fix                3 all rheo/pressure linear
+fix                1 all rheo ${cut} cubic 32 surface/detection coordination 80 10 density ${rho0} ${rho0}
+fix                2 all rheo/viscosity * constant ${eta}
+fix                3 all rheo/pressure * linear
 fix                4 all rheo/stress
 # fix                5 rig setforce 0.0 0.0 0.0
 ## fix                6 top addforce 0.0 -${fext} 0.0
