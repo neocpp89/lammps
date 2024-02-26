@@ -336,8 +336,22 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     // }
 
     // modify for boundary a bit
-    const double width = 0.25;
-    const double y_c = 2.0;
+#if 0
+    const double width = 0.2;
+    const double y_c = 2.1;
+    const double y = x[i][1];
+    const double s = ((y_c - y) / width);
+    if (y < y_c) {
+        v[i][0] *= s;
+        v[i][1] *= s;
+        v[i][2] *= s;
+    }
+    if (y < (y_c - width)) {
+        v[i][0] = 0;
+        v[i][1] = 0;
+        v[i][2] = 0;
+    }
+#endif
 
     // if (1 <= tag[i] && tag[i] <= 200) {
     //     // const double v_init = v[i][1];

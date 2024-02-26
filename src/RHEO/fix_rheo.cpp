@@ -317,6 +317,95 @@ void FixRHEO::initial_integrate(int /*vflag*/)
   if (igroup == atom->firstgroup)
     nlocal = atom->nfirst;
 
+  // hack for BCS
+  // [sdunatunga] Tue 13 Feb 2024 07:53:19 AM PST
+  for (i = 0; i < nlocal; i++) {
+    if (status[i] & STATUS_NO_INTEGRATION) continue;
+
+    if (mask[i] & groupbit) {
+      if (rmass_flag) {
+        dtfm = dtf / rmass[i];
+      } else {
+        dtfm = dtf / mass[type[i]];
+      }
+
+        const double ftest[] = {
+                -v[i][0] / dtfm,
+                -v[i][1] / dtfm,
+                -v[i][2] / dtfm,
+        };
+
+        // silo type BCS
+        // bottom wall
+        {
+            const double width = 0.2;
+            const double y_c = -10.0;
+            const double y = x[i][1];
+            double s = ((y - y_c) / width);
+            if (s > 1) {
+                s = 1;
+            } else if (s < 0) {
+                s = 0;
+            }
+            f[i][0] = (1.0 - s) * ftest[0] + s * f[i][0];
+            f[i][1] = (1.0 - s) * ftest[1] + s * f[i][1];
+            f[i][2] = (1.0 - s) * ftest[2] + s * f[i][2];
+
+            // if (y < y_c) {
+            //     v[i][0] *= s;
+            //     v[i][1] *= s;
+            //     v[i][2] *= s;
+            // }
+            // if (y < (y_c - width)) {
+            //     v[i][0] = 0;
+            //     v[i][1] = 0;
+            //     v[i][2] = 0;
+            // }
+        }
+        // left side
+        {
+            const double width = 0.1;
+            const double y_c = 0;
+            const double _x = x[i][0];
+            const double y = x[i][1];
+            double s = ((y - y_c) / width);
+            // double s = ((y_c - y) / width);
+            // if (((_x > 1) || (_x < -1)) && (y < y_c)) {
+            //     v[i][0] *= s;
+            //     v[i][1] *= s;
+            //     v[i][2] *= s;
+            // }
+            // if (((_x > 1) || (_x < -1)) && ((y < (y_c - width)) && (y > -1))) {
+            //     v[i][0] = 0;
+            //     v[i][1] = 0;
+            //     v[i][2] = 0;
+            // }
+            if (s > 1) {
+                s = 1;
+            } else if (s < 0) {
+                s = 0;
+            }
+
+            if ((-1 <= _x && _x <= 1) || y < (y_c - width)) {
+                // Free particle below the ledge
+                s = 1;
+            }
+/*
+            if (((_x > 1) || (_x < -1)) && (y < y_c)) {
+            } else {
+                s = 1.0;
+            }
+            if (((_x > 1) || (_x < -1)) && ((y < (y_c - width)) && (y > -1))) {
+                s = 0;
+            }
+*/
+            f[i][0] = (1.0 - s) * ftest[0] + s * f[i][0];
+            f[i][1] = (1.0 - s) * ftest[1] + s * f[i][1];
+            f[i][2] = (1.0 - s) * ftest[2] + s * f[i][2];
+        }
+    }
+  }
+
   //Density Half-step
   for (i = 0; i < nlocal; i++) {
     if (status[i] & STATUS_NO_INTEGRATION) continue;

@@ -22,24 +22,28 @@ lattice            sq ${n}
 
 # region             left_wall block -1 0 EDGE EDGE -0.01 0.01 units box
 # region             right_wall block 53.66 EDGE EDGE EDGE -0.01 0.01 units box
-region             left  block EDGE -1 -1 0 -0.01 0.01 units box
-region             right block 1 EDGE -1 0 -0.01 0.01 units box
-region             bot_wall block EDGE EDGE EDGE -9 -0.01 0.01 units box
+
+# region             left  block EDGE -1 -1 0 -0.01 0.01 units box
+# region             right block 1 EDGE -1 0 -0.01 0.01 units box
+# region             bot_wall block EDGE EDGE EDGE -9 -0.01 0.01 units box
+
 region             interior block -3 3 0.01 6 -0.01 0.01 units box
 
 create_atoms       1 region interior
 # create_atoms       2 region left_wall
 # create_atoms       2 region right_wall
-create_atoms       2 region right
-create_atoms       2 region left
-create_atoms       2 region bot_wall
+
+# create_atoms       2 region right
+# create_atoms       2 region left
+# create_atoms       2 region bot_wall
+
 # create_atoms       4 region bot_wall
 
 group              fluid type 1
-group              static_wall type 2
-group              dyn_wall type 3
-# group              fluid2 type 4
-group              rig union static_wall dyn_wall
+# group              static_wall type 2
+# group              dyn_wall type 3
+# # group              fluid2 type 4
+# group              rig union static_wall dyn_wall
 
 
 # ------ Model parameters ------ #
@@ -51,8 +55,8 @@ variable           cs equal 10
 variable           zeta equal 1
 variable           Dr equal 0.1*${cut}*${cs}
 variable           dt_max equal 1e-5
-# variable           g equal 0.0245
-variable           g equal 9.81
+variable           g equal 0.0245
+# variable           g equal 9.81
 # variable           fext equal ${g}/${n}
 variable           fext equal ${g}
 variable           eta equal 0.05
@@ -63,7 +67,7 @@ set                group all rheo/rho ${rho0}
 set                group fluid rheo/rho v_d0
 
 set                group all rheo/status 0
-set                group rig rheo/status 2
+# set                group rig rheo/status 2
 
 timestep           ${dt_max}
 
@@ -74,11 +78,11 @@ pair_coeff         * *
 
 # ------ Fixes & computes ------ #
 
-fix                1 all rheo ${cut} cubic 32 surface/detection coordination 80 10
-fix                2 all rheo/viscosity constant ${eta}
-fix                3 all rheo/pressure linear
+fix                1 all rheo ${cut} cubic 32 surface/detection coordination 80 10 density ${rho0} ${rho0}
+fix                2 all rheo/viscosity * constant ${eta}
+fix                3 all rheo/pressure * linear
 fix                4 all rheo/stress
-fix                5 rig setforce 0.0 0.0 0.0
+# fix                5 rig setforce 0.0 0.0 0.0
 fix                6 fluid addforce 0.0 -${fext} 0.0
 fix                7 all balance 1000 1.1 rcb
 # fix                8 fluid2 addforce 0.0 ${fext} 0.0
