@@ -288,6 +288,86 @@ void FixRHEO::setup(int /*vflag*/)
 
 /* ---------------------------------------------------------------------- */
 
+
+// Normal points leftward along path (xl, yl) to (xr, yr).
+typedef struct {
+    double xl;
+    double yl;
+    double xr;
+    double yr;
+    double ramp_thickness;
+    double dead_thickness;
+    double mu;
+} sd_boundary_t;
+
+static const double boundary_thickness = 0.1;
+
+static const sd_boundary_t boundaries[] = {
+    // bottom wall
+    {-3.0, -10.0, 3.0, -10.0, boundary_thickness, boundary_thickness, 1.0},
+
+    // silo orifice walls
+    {-3.0, 0.0, -1.0, 0.0, boundary_thickness, boundary_thickness, 1.0},
+    {1.0, 0.0, 3.0, 0.0, boundary_thickness, boundary_thickness, 1.0},
+
+    // outer walls
+    {-3.0, 3.0, -3.0, -10.0, boundary_thickness, boundary_thickness, 0.0},
+    {3.0, -10.0, 3.0, 3.0, boundary_thickness, boundary_thickness, 0.0},
+};
+
+static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
+{
+    const double dx = boundary->xr - boundary->xl;
+    const double dy = boundary->yr - boundary->yl;
+    const double r = hypot(dx, dy);
+    *xn = -dy / r;
+    *yn = dx / r;
+}
+
+static double clamp_unity(double v)
+{
+    if (v < 0.0) {
+        return 0.0;
+    } else if (v > 1.0) {
+        return 1.0;
+    } else {
+        return v;
+    }
+}
+
+static double boundary_strength(double x, double y, const sd_boundary_t * const boundary)
+{
+    const double dtx = x - boundary->xl;
+    const double dty = y - boundary->yl;
+
+    const double dx = boundary->xr - boundary->xl;
+    const double dy = boundary->yr - boundary->yl;
+
+    const double s = (dx * dtx + dy * dty) / (dx * dx + dy * dy);
+
+    // Nominally within line segment region.
+    if (0.0 <= s && s <= 1.0) {
+        const double r = hypot(dx, dy);
+        double d = 0.0;
+        if (dx != 0.0) {
+            d = r * ((dty - dy * s) / dx);
+        } else if (dy != 0.0) {
+            d = r * (-(dtx - dx * s) / dy);
+        }
+
+        if (0.0 <= d && d <= boundary->ramp_thickness) {
+            return clamp_unity(1.0 - (d / boundary->ramp_thickness));
+        }
+
+        if (-boundary->dead_thickness <= d && d < 0.0) {
+            return 1.0;
+        }
+    } else {
+        return 0.0;
+    }
+    return 0.0;
+}
+
 void FixRHEO::initial_integrate(int /*vflag*/)
 {
   // update v, x and rho of atoms in group
@@ -335,6 +415,18 @@ void FixRHEO::initial_integrate(int /*vflag*/)
                 -v[i][2] / dtfm,
         };
 
+        for (size_t bi = 0; bi < sizeof(boundaries)/sizeof(boundaries[0]); ++bi) {
+            const double s = boundary_strength(x[i][0], x[i][1], &boundaries[bi]);
+            if (s != 0.0) {
+                f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
+                f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
+                f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
+                // FIXME : only applies the first wall this particle checks against.
+                break;
+            }
+        }
+
+#if 0
         // silo type BCS
         // bottom wall
         {
@@ -403,6 +495,7 @@ void FixRHEO::initial_integrate(int /*vflag*/)
             f[i][1] = (1.0 - s) * ftest[1] + s * f[i][1];
             f[i][2] = (1.0 - s) * ftest[2] + s * f[i][2];
         }
+#endif
     }
   }
 
