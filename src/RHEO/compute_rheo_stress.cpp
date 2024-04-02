@@ -34,6 +34,9 @@
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 
+// #define SD_PRINTF(args...) printf(args);
+#define SD_PRINTF(args...)
+
 /* ---------------------------------------------------------------------- */
 ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   Compute(lmp, narg, arg), list(nullptr), stress(nullptr), fix_rheo(nullptr)
@@ -323,16 +326,16 @@ void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_
 
     multiply(tmp, W, T);
     // if (tmp[0] != 0.0) {
-    //     printf("WTxx = %17.9g\n", tmp[0]);
-    //     printf("Txx = %17.9g\n", T[0]);
-    //     printf("Wxx = %17.9g\n", W[0]);
+    //     SD_PRINTF("WTxx = %17.9g\n", tmp[0]);
+    //     SD_PRINTF("Txx = %17.9g\n", T[0]);
+    //     SD_PRINTF("Wxx = %17.9g\n", W[0]);
     // }
     accumulate(jaumann_stress_increment, tmp);
 
     multiply(tmp, T, W);
     scale(tmp, -1.0);
     // if (tmp[0] != 0.0) {
-    //     printf("TWxx = %17.9g\n", tmp[0]);
+    //     SD_PRINTF("TWxx = %17.9g\n", tmp[0]);
     // }
     accumulate(jaumann_stress_increment, tmp);
 
@@ -437,7 +440,7 @@ void ComputeRHEOStress::update_one_material_point_stress(double *ptxxdev, double
         accumulate(T, T0_tr);
         // *ptxxdev = T0_tr[Full3XX];
     } else {
-        printf("p_tr: %.17g, density_flag: %d\n", p_tr, (int)density_flag);
+        SD_PRINTF("p_tr: %.17g, density_flag: %d\n", p_tr, (int)density_flag);
         error->all(FLERR,"Unhandled stress state detected.");
         nup_tau = 0;
     }
@@ -587,9 +590,9 @@ void ComputeRHEOStress::compute_peratom()
     // update_one_material_point_stress_elastic(T, L, density, dt, dim);
 
     if (atom->tag[i] == 1) {
-        printf("txx %17.9g\n", T[VoigtXX]);
-        printf("txy %17.9g\n", T[VoigtXY]);
-        printf("tyy %17.9g\n", T[VoigtYY]);
+        SD_PRINTF("txx %17.9g\n", T[VoigtXX]);
+        SD_PRINTF("txy %17.9g\n", T[VoigtXY]);
+        SD_PRINTF("tyy %17.9g\n", T[VoigtYY]);
     }
 
     // if (
@@ -604,7 +607,7 @@ void ComputeRHEOStress::compute_peratom()
     // }
 
     // if (i == 501) {
-    //     printf("Txx, Tyy, Tzz, Txy, Txz, Tyz = %17.17g %17.17g %17.17g %17.17g %17.17g %17.17g\n",
+    //     SD_PRINTF("Txx, Tyy, Tzz, Txy, Txz, Tyz = %17.17g %17.17g %17.17g %17.17g %17.17g %17.17g\n",
     //         T[0],
     //         T[1],
     //         T[2],

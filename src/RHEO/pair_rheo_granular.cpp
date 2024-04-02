@@ -46,6 +46,9 @@ using namespace MathExtra;
 
 static constexpr double EPSILON = 1e-2;
 
+// #define SD_PRINTF(args...) SD_PRINTF(args);
+#define SD_PRINTF(args...)
+
 /* ---------------------------------------------------------------------- */
 
 PairRHEOGranular::PairRHEOGranular(LAMMPS *lmp) :
@@ -268,7 +271,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWij[2];
 
         if (atom->tag[i] == 1) {
-            printf("divsigma j %d = [%17.9g %17.9g %17.9g]\n",
+            SD_PRINTF("divsigma j %d = [%17.9g %17.9g %17.9g]\n",
                     (int)atom->tag[j],
                     sdotdw[0],
                     sdotdw[1],
@@ -322,8 +325,8 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   const double dt = update->dt;
   for (i = 0; i < atom->nlocal; i++) {
     if (atom->tag[i] == 1) {
-        printf("sdiv[i] = [%17.9g %17.9g %17.9g]\n", sdiv[i][0], sdiv[i][1], sdiv[i][2]);
-        printf("f[i] = [%17.9g %17.9g %17.9g]\n", f[i][0], f[i][1], f[i][2]);
+        SD_PRINTF("sdiv[i] = [%17.9g %17.9g %17.9g]\n", sdiv[i][0], sdiv[i][1], sdiv[i][2]);
+        SD_PRINTF("f[i] = [%17.9g %17.9g %17.9g]\n", f[i][0], f[i][1], f[i][2]);
     }
     f[i][0] += sdiv[i][0];
     f[i][1] += sdiv[i][1];

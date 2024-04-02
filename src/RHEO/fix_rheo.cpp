@@ -37,6 +37,9 @@ using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 using namespace FixConst;
 
+// #define SD_PRINTF(args...) printf(args);
+#define SD_PRINTF(args...)
+
 /* ---------------------------------------------------------------------- */
 
 FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
@@ -237,6 +240,9 @@ void FixRHEO::setup_pre_force(int /*vflag*/)
 
 /* ---------------------------------------------------------------------- */
 
+static void bc_setup(void);
+static double clamp_unity(double v);
+
 void FixRHEO::setup(int /*vflag*/)
 {
   // Confirm all accessory fixes are defined
@@ -284,6 +290,8 @@ void FixRHEO::setup(int /*vflag*/)
 
   if (rhosum_flag)
     compute_rhosum->compute_peratom();
+
+  bc_setup();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -310,20 +318,51 @@ typedef struct {
 // dead_thickness is along negative normal. r1 and r2 are HALF of the distance
 // in each dimension of the bounding rectangular prism.
 typedef struct {
+    vector_3d_t origin;
     vector_3d_t r1;
     vector_3d_t r2;
+
     double ramp_thickness;
     double dead_thickness;
     double mu;
+
+    // computed
+    double r1_mag;
+    double r2_mag;
+    vector_3d_t n1;
+    vector_3d_t n2;
+    vector_3d_t n3;
 } sd_boundary_3d_t;
+
+static double dot(const vector_3d_t * const a, const vector_3d_t * const b)
+{
+    return (a->x * b->x) + (a->y * b->y) + (a->z * b->z);
+}
+
+static double magnitude_squared(const vector_3d_t * const v)
+{
+    return dot(v, v);
+}
+
+static void normalize(vector_3d_t *v)
+{
+    const double d = sqrt(magnitude_squared(v));
+    v->x /= d;
+    v->y /= d;
+    v->z /= d;
+}
 
 static vector_3d_t compute_normal(const vector_3d_t * const r1, const vector_3d_t * const r2)
 {
-    const vector_3d_t n = {
-        .x =  (r1->y * r2->z - r1->z * r2->y),
-        .y = -(r1->x * r2->z - r1->z * r2->x),
-        .z =  (r1->x * r2->y - r1->y * r2->x),
+    vector_3d_t n = {
+        .x =  ((r1->y * r2->z) - (r1->z * r2->y)),
+        .y = -((r1->x * r2->z) - (r1->z * r2->x)),
+        .z =  ((r1->x * r2->y) - (r1->y * r2->x)),
     };
+
+    // Actually normalize the normal too...
+    normalize(&n);
+
     return n;
 }
 
@@ -348,6 +387,145 @@ static const sd_boundary_t boundaries[] = {
     {-3.0, 3.0, -3.0, 0.0, boundary_thickness, dead_thickness, 0.0},
     {3.0, 0.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
 };
+
+static sd_boundary_3d_t b3[] = {
+    // 4 sidewalls
+    {
+        .origin = {0.0, 1.5, 3.0},
+        .r1 = {-3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {3.0, 1.5, 0.0},
+        .r1 = {0.0, 0.0, 3.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {0.0, 1.5, -3.0},
+        .r1 = {3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {-3.0, 1.5, 0.0},
+        .r1 = {0.0, 0.0, -3.0},
+        .r2 = {0.0, 1.5, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+
+    // 4 angled hopper plates
+    {
+        .origin = {0.0, -1.0, 2.0},
+        .r1 = {-3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, 1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, 3.0},
+        .r2 = {1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {0.0, -1.0, -2.0},
+        .r1 = {3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, -1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+    {
+        .origin = {-2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, -3.0},
+        .r2 = {-1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+
+    // bottom collector
+    {
+        .origin = {0.0, -6.0, 0.0},
+        .r1 = {10.0, 0.0, 0.0},
+        .r2 = {0.0, 0.0, -10.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 1.0,
+    },
+};
+
+static void bc_setup(void)
+{
+    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
+        sd_boundary_3d_t * const entry = &b3[bi];
+        entry->n1 = entry->r1;
+        normalize(&entry->n1);
+        entry->n2 = entry->r2;
+        normalize(&entry->n2);
+        entry->n3 = compute_normal(&entry->r1, &entry->r2);
+
+        entry->r1_mag = sqrt(magnitude_squared(&entry->r1));
+        entry->r2_mag = sqrt(magnitude_squared(&entry->r2));
+    }
+
+    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
+        sd_boundary_3d_t * const entry = &b3[bi];
+        printf("boundary[%zu]: origin = {%.17g, %.17g, %.17g}\n", bi, entry->origin.x, entry->origin.y, entry->origin.z);
+        printf("boundary[%zu]: r1 = {%.17g, %.17g, %.17g}\n", bi, entry->r1.x, entry->r1.y, entry->r1.z);
+        printf("boundary[%zu]: r2 = {%.17g, %.17g, %.17g}\n", bi, entry->r2.x, entry->r2.y, entry->r2.z);
+        printf("boundary[%zu]: ramp_thickness = %.17g\n", bi, entry->ramp_thickness);
+        printf("boundary[%zu]: dead_thickness = %.17g\n", bi, entry->dead_thickness);
+        printf("boundary[%zu]: mu = %.17g\n", bi, entry->mu);
+        printf("boundary[%zu]: n1 = {%.17g, %.17g, %.17g}\n", bi, entry->n1.x, entry->n1.y, entry->n1.z);
+        printf("boundary[%zu]: n2 = {%.17g, %.17g, %.17g}\n", bi, entry->n2.x, entry->n2.y, entry->n2.z);
+        printf("boundary[%zu]: n3 = {%.17g, %.17g, %.17g}\n", bi, entry->n3.x, entry->n3.y, entry->n3.z);
+        printf("boundary[%zu]: r1_mag = %.17g\n", bi, entry->r1_mag);
+        printf("boundary[%zu]: r2_mag = %.17g\n", bi, entry->r2_mag);
+        printf("---\n");
+    }
+}
+
+static void b3_strength(double *strength, bool *in_dead_zone, const vector_3d_t * const xp, const sd_boundary_3d_t * const boundary)
+{
+    // set outputs
+    *strength = 0.0;
+    *in_dead_zone = false;
+
+    const vector_3d_t v = {
+        .x = xp->x - boundary->origin.x,
+        .y = xp->y - boundary->origin.y,
+        .z = xp->z - boundary->origin.z,
+    };
+
+    const double x1 = dot(&v, &boundary->n1);
+    if (-boundary->r1_mag <= x1 && x1 <= boundary->r1_mag) {
+        const double x2 = dot(&v, &boundary->n2);
+        if (-boundary->r2_mag <= x2 && x2 <= boundary->r2_mag) {
+            const double x3 = dot(&v, &boundary->n3);
+            if (-boundary->dead_thickness <= x3 && x3 <= 0) {
+                *strength = 1.0;
+                *in_dead_zone = true;
+            } else if (0 < x3 && x3 <= boundary->ramp_thickness) {
+                *strength = clamp_unity(1.0 - (x3 / boundary->ramp_thickness));
+                *in_dead_zone = false;
+            }
+        }
+    }
+}
 
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
 {
@@ -452,6 +630,46 @@ void FixRHEO::initial_integrate(int /*vflag*/)
                 -v[i][2] / dtfm,
         };
 
+        for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
+            const sd_boundary_3d_t * const entry = &b3[bi];
+            double s = 0.0;
+            bool in_dead_zone = false;
+            const vector_3d_t xp = {
+                .x = x[i][0],
+                .y = x[i][1],
+                .z = x[i][2],
+            };
+            b3_strength(&s, &in_dead_zone, &xp, entry);
+
+            if (s != 0.0) {
+                // Flip normal if in the dead zone to get the right force
+                // direction.
+                if (boundaries[bi].mu == 0.0) {
+                    vector_3d_t normal = {
+                        .x = entry->n3.x,
+                        .y = entry->n3.y,
+                        .z = entry->n3.z,
+                    };
+                    if (in_dead_zone) {
+                        normal.x = -normal.x;
+                        normal.y = -normal.y;
+                        normal.z = -normal.z;
+                    }
+                    f[i][0] = normal.x * s * ftest[0] + (1.0 - s) * f[i][0];
+                    f[i][1] = normal.y * s * ftest[1] + (1.0 - s) * f[i][1];
+                    f[i][2] = normal.z * s * ftest[2] + (1.0 - s) * f[i][2];
+                } else {
+                    f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
+                    f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
+                    f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
+                }
+                // FIXME : only applies the first wall this particle checks against.
+                break;
+            }
+        }
+
+// 2D BC only
+#if 0
         for (size_t bi = 0; bi < sizeof(boundaries)/sizeof(boundaries[0]); ++bi) {
             double s = 0.0;
             bool in_dead_zone = false;
@@ -485,6 +703,7 @@ void FixRHEO::initial_integrate(int /*vflag*/)
                 break;
             }
         }
+#endif
 
 #if 0
         // silo type BCS
@@ -575,7 +794,7 @@ void FixRHEO::initial_integrate(int /*vflag*/)
       v[i][2] += dtfm * f[i][2];
 
       if (atom->tag[i] == 1) {
-          printf("initial_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+          SD_PRINTF("initial_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
       }
     }
   }
@@ -583,59 +802,59 @@ void FixRHEO::initial_integrate(int /*vflag*/)
   // Update gradients and interpolate solid properties
   compute_grad->forward_fields(); // also forwards v and rho for chi
   if (interface_flag) {
-    // Need to save, wiped in exchange
-    compute_interface->store_forces();
-    compute_interface->compute_peratom();
+      // Need to save, wiped in exchange
+      compute_interface->store_forces();
+      compute_interface->compute_peratom();
   }
   compute_grad->compute_peratom();
 
   // Position half-step
   for (i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) {
-      for (a = 0; a < dim; a++) {
-        x[i][a] += dtv * v[i][a];
+      if (mask[i] & groupbit) {
+          for (a = 0; a < dim; a++) {
+              x[i][a] += dtv * v[i][a];
+          }
       }
-    }
   }
 
   // Update density using div(u)
   if (!rhosum_flag) {
-    for (i = 0; i < nlocal; i++) {
-      if (mask[i] & groupbit) {
-        if (status[i] & STATUS_NO_INTEGRATION) continue;
-        if (status[i] & PHASECHECK) continue;
+      for (i = 0; i < nlocal; i++) {
+          if (mask[i] & groupbit) {
+              if (status[i] & STATUS_NO_INTEGRATION) continue;
+              if (status[i] & PHASECHECK) continue;
 
-        divu = 0;
-        for (a = 0; a < dim; a++) {
-          divu += gradv[i][a * (1 + dim)];
-        }
-        rho[i] += dtf * (drho[i] - rho[i] * divu);
+              divu = 0;
+              for (a = 0; a < dim; a++) {
+                  divu += gradv[i][a * (1 + dim)];
+              }
+              rho[i] += dtf * (drho[i] - rho[i] * divu);
+          }
       }
-    }
   }
 
   // Shifting atoms
   if (shift_flag) {
-    for (i = 0; i < nlocal; i++) {
+      for (i = 0; i < nlocal; i++) {
 
-      if (status[i] & STATUS_NO_SHIFT) continue;
+          if (status[i] & STATUS_NO_SHIFT) continue;
 
-      if (mask[i] & groupbit) {
-        for (a = 0; a < dim; a++) {
-          x[i][a] += dtv * vshift[i][a];
-          for (b = 0; b < dim; b++) {
-            v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b];
+          if (mask[i] & groupbit) {
+              for (a = 0; a < dim; a++) {
+                  x[i][a] += dtv * vshift[i][a];
+                  for (b = 0; b < dim; b++) {
+                      v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b];
+                  }
+              }
+
+              if (!rhosum_flag) {
+                  if (status[i] & PHASECHECK) continue;
+                  for (a = 0; a < dim; a++) {
+                      rho[i] += dtv * vshift[i][a] * gradr[i][a];
+                  }
+              }
           }
-        }
-
-        if (!rhosum_flag) {
-          if (status[i] & PHASECHECK) continue;
-          for (a = 0; a < dim; a++) {
-            rho[i] += dtv * vshift[i][a] * gradr[i][a];
-          }
-        }
       }
-    }
   }
 }
 
@@ -643,82 +862,82 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
 void FixRHEO::pre_force(int /*vflag*/)
 {
-  compute_kernel->compute_coordination(); // Needed for rho sum
+    compute_kernel->compute_coordination(); // Needed for rho sum
 
-  if (rhosum_flag)
-    compute_rhosum->compute_peratom();
+    if (rhosum_flag)
+        compute_rhosum->compute_peratom();
 
-  compute_kernel->compute_peratom();
+    compute_kernel->compute_peratom();
 
-  if (interface_flag) {
-    // Note on first setup, have no forces for pressure to reference
-    compute_interface->compute_peratom();
-  }
+    if (interface_flag) {
+        // Note on first setup, have no forces for pressure to reference
+        compute_interface->compute_peratom();
+    }
 
-  // No need to forward v, rho, or T for compute_grad since already done
-  compute_grad->compute_peratom();
-  compute_grad->forward_gradients();
+    // No need to forward v, rho, or T for compute_grad since already done
+    compute_grad->compute_peratom();
+    compute_grad->forward_gradients();
 
-  if (shift_flag)
-    compute_vshift->compute_peratom();
-
-  // Remove temporary options
-  int *mask = atom->mask;
-  int *status = atom->status;
-  int nall = atom->nlocal + atom->nghost;
-  for (int i = 0; i < nall; i++)
-    if (mask[i] & groupbit)
-      status[i] &= OPTIONSMASK;
-
-  // Calculate surfaces, update status
-  if (surface_flag) {
-    compute_surface->compute_peratom();
     if (shift_flag)
-      compute_vshift->correct_surfaces();
-  }
+        compute_vshift->compute_peratom();
+
+    // Remove temporary options
+    int *mask = atom->mask;
+    int *status = atom->status;
+    int nall = atom->nlocal + atom->nghost;
+    for (int i = 0; i < nall; i++)
+        if (mask[i] & groupbit)
+            status[i] &= OPTIONSMASK;
+
+    // Calculate surfaces, update status
+    if (surface_flag) {
+        compute_surface->compute_peratom();
+        if (shift_flag)
+            compute_vshift->correct_surfaces();
+    }
 }
 
 /* ---------------------------------------------------------------------- */
 
 void FixRHEO::final_integrate()
 {
-  int nlocal = atom->nlocal;
-  if (igroup == atom->firstgroup)
-    nlocal = atom->nfirst;
+    int nlocal = atom->nlocal;
+    if (igroup == atom->firstgroup)
+        nlocal = atom->nfirst;
 
-  double dtfm, divu;
-  int i, a;
+    double dtfm, divu;
+    int i, a;
 
-  double **x = atom->x;
-  double **v = atom->v;
-  double **f = atom->f;
-  double **gradv = compute_grad->gradv;
-  double *rho = atom->rho;
-  double *drho = atom->drho;
-  double *mass = atom->mass;
-  double *rmass = atom->rmass;
-  int *type = atom->type;
-  int *mask = atom->mask;
-  int *status = atom->status;
+    double **x = atom->x;
+    double **v = atom->v;
+    double **f = atom->f;
+    double **gradv = compute_grad->gradv;
+    double *rho = atom->rho;
+    double *drho = atom->drho;
+    double *mass = atom->mass;
+    double *rmass = atom->rmass;
+    int *type = atom->type;
+    int *mask = atom->mask;
+    int *status = atom->status;
 
-  int rmass_flag = atom->rmass_flag;
-  int dim = domain->dimension;
+    int rmass_flag = atom->rmass_flag;
+    int dim = domain->dimension;
 
-  // Update velocity
-  for (i = 0; i < nlocal; i++) {
-    if (mask[i] & groupbit) {
-      if (status[i] & STATUS_NO_INTEGRATION) continue;
+    // Update velocity
+    for (i = 0; i < nlocal; i++) {
+        if (mask[i] & groupbit) {
+            if (status[i] & STATUS_NO_INTEGRATION) continue;
 
-      if (rmass_flag) {
-        dtfm = dtf / rmass[i];
-      } else {
-        dtfm = dtf / mass[type[i]];
-      }
+            if (rmass_flag) {
+                dtfm = dtf / rmass[i];
+            } else {
+                dtfm = dtf / mass[type[i]];
+            }
 
-      for (a = 0; a < dim; a++) {
-        v[i][a] += dtfm * f[i][a];
-        if ((atom->tag[i] == 1) && (a == 0)) {
-            printf("final_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
+            for (a = 0; a < dim; a++) {
+                v[i][a] += dtfm * f[i][a];
+                if ((atom->tag[i] == 1) && (a == 0)) {
+                    SD_PRINTF("final_integrate v = [%17.9g %17.9g %17.9g]\n", v[i][0], v[i][1], v[i][2]);
         }
       }
     }
