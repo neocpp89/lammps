@@ -75,7 +75,7 @@ set                group all rheo/status 0
 timestep           ${dt_max}
 
 # pair_style         rheo ${cut} artificial/visc ${zeta} rho/damp ${Dr}
-pair_style         rheo/granular ${cut}
+pair_style         rheo/granular ${cut} artificial/visc 1.0
 pair_coeff         * *
 
 

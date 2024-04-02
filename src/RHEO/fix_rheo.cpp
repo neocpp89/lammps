@@ -300,19 +300,53 @@ typedef struct {
     double mu;
 } sd_boundary_t;
 
-static const double boundary_thickness = 0.1;
+typedef struct {
+    double x;
+    double y;
+    double z;
+} vector_3d_t;
+
+// Normal formed from r1 x r2. ramp_thickness is along positive normal and
+// dead_thickness is along negative normal. r1 and r2 are HALF of the distance
+// in each dimension of the bounding rectangular prism.
+typedef struct {
+    vector_3d_t r1;
+    vector_3d_t r2;
+    double ramp_thickness;
+    double dead_thickness;
+    double mu;
+} sd_boundary_3d_t;
+
+static vector_3d_t compute_normal(const vector_3d_t * const r1, const vector_3d_t * const r2)
+{
+    const vector_3d_t n = {
+        .x =  (r1->y * r2->z - r1->z * r2->y),
+        .y = -(r1->x * r2->z - r1->z * r2->x),
+        .z =  (r1->x * r2->y - r1->y * r2->x),
+    };
+    return n;
+}
+
+// static const double boundary_thickness = 0.1;
+static const double boundary_thickness = 0.01;
+static const double dead_thickness = 0.1;
 
 static const sd_boundary_t boundaries[] = {
     // bottom wall
-    {-3.0, -10.0, 3.0, -10.0, boundary_thickness, boundary_thickness, 1.0},
+    // {-3.0, -10.0, 3.0, -10.0, boundary_thickness, dead_thickness, 1.0},
+    {-20.0, -6.0, 20.0, -6.0, boundary_thickness, dead_thickness, 1.0},
 
     // silo orifice walls
-    {-3.0, 0.0, -1.0, 0.0, boundary_thickness, boundary_thickness, 1.0},
-    {1.0, 0.0, 3.0, 0.0, boundary_thickness, boundary_thickness, 1.0},
+    // {-3.0, 0.0, -1.0, 0.0, boundary_thickness, dead_thickness, 1.0},
+    // {1.0, 0.0, 3.0, 0.0, boundary_thickness, dead_thickness, 1.0},
+    {-3.0, 0.0, -1.0, -1.0, boundary_thickness, dead_thickness, 1.0},
+    {1.0, -1.0, 3.0, 0.0, boundary_thickness, dead_thickness, 1.0},
 
     // outer walls
-    {-3.0, 3.0, -3.0, -10.0, boundary_thickness, boundary_thickness, 0.0},
-    {3.0, -10.0, 3.0, 3.0, boundary_thickness, boundary_thickness, 0.0},
+    // {-3.0, 3.0, -3.0, -10.0, boundary_thickness, dead_thickness, 0.0},
+    // {3.0, -10.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
+    {-3.0, 3.0, -3.0, 0.0, boundary_thickness, dead_thickness, 0.0},
+    {3.0, 0.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
 };
 
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
@@ -335,7 +369,7 @@ static double clamp_unity(double v)
     }
 }
 
-static double boundary_strength(double x, double y, const sd_boundary_t * const boundary)
+static void boundary_strength(double *strength, bool *in_dead_zone, double x, double y, const sd_boundary_t * const boundary)
 {
     const double dtx = x - boundary->xl;
     const double dty = y - boundary->yl;
@@ -344,6 +378,10 @@ static double boundary_strength(double x, double y, const sd_boundary_t * const 
     const double dy = boundary->yr - boundary->yl;
 
     const double s = (dx * dtx + dy * dty) / (dx * dx + dy * dy);
+
+    // set outputs
+    *strength = 0.0;
+    *in_dead_zone = false;
 
     // Nominally within line segment region.
     if (0.0 <= s && s <= 1.0) {
@@ -356,16 +394,15 @@ static double boundary_strength(double x, double y, const sd_boundary_t * const 
         }
 
         if (0.0 <= d && d <= boundary->ramp_thickness) {
-            return clamp_unity(1.0 - (d / boundary->ramp_thickness));
+            *strength = clamp_unity(1.0 - (d / boundary->ramp_thickness));
+            *in_dead_zone = false;
         }
 
         if (-boundary->dead_thickness <= d && d < 0.0) {
-            return 1.0;
+            *strength = 1.0;
+            *in_dead_zone = true;
         }
-    } else {
-        return 0.0;
     }
-    return 0.0;
 }
 
 void FixRHEO::initial_integrate(int /*vflag*/)
@@ -416,11 +453,34 @@ void FixRHEO::initial_integrate(int /*vflag*/)
         };
 
         for (size_t bi = 0; bi < sizeof(boundaries)/sizeof(boundaries[0]); ++bi) {
-            const double s = boundary_strength(x[i][0], x[i][1], &boundaries[bi]);
+            double s = 0.0;
+            bool in_dead_zone = false;
+            boundary_strength(&s, &in_dead_zone, x[i][0], x[i][1], &boundaries[bi]);
+
             if (s != 0.0) {
-                f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
-                f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
-                f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
+                double n[3] = {
+                    0.0,
+                    0.0,
+                    0.0,
+                };
+
+                // Flip normal if in the dead zone to get the right force
+                // direction.
+                if (boundaries[bi].mu == 0.0) {
+                    boundary_normal(&n[0], &n[1], &boundaries[bi]);
+                    if (in_dead_zone) {
+                        n[0] = -n[0];
+                        n[1] = -n[1];
+                        n[2] = -n[2];
+                    }
+                    f[i][0] = n[0] * s * ftest[0] + (1.0 - s) * f[i][0];
+                    f[i][1] = n[1] * s * ftest[1] + (1.0 - s) * f[i][1];
+                    f[i][2] = n[2] * s * ftest[2] + (1.0 - s) * f[i][2];
+                } else {
+                    f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
+                    f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
+                    f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
+                }
                 // FIXME : only applies the first wall this particle checks against.
                 break;
             }
