@@ -24,6 +24,8 @@
 #include "compute_rheo_surface.h"
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_rho_sum.h"
+#include "fix_rheo_stress.h"
+#include "compute_rheo_stress.h"
 #include "compute_rheo_vshift.h"
 #include "domain.h"
 #include "error.h"
@@ -32,6 +34,8 @@
 #include "modify.h"
 #include "update.h"
 #include "utils.h"
+
+#include <cassert>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
@@ -206,6 +210,7 @@ int FixRHEO::setmask()
   mask |= INITIAL_INTEGRATE;
   mask |= FINAL_INTEGRATE;
   mask |= PRE_FORCE;
+  mask |= POST_FORCE;
   return mask;
 }
 
@@ -389,7 +394,49 @@ static const sd_boundary_t boundaries[] = {
 };
 
 static sd_boundary_3d_t b3[] = {
+#if 1
+    // 4 angled hopper plates
+    {
+        .origin = {0.0, -1.0, 2.0},
+        .r1 = {-3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, 1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+#if 0
+    {
+        .origin = {2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, 3.0},
+        .r2 = {1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+#endif
+#if 0
+    {
+        .origin = {0.0, -1.0, -2.0},
+        .r1 = {3.0, 0.0, 0.0},
+        .r2 = {0.0, 1.0, -1.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+#endif
+#if 0
+    {
+        .origin = {-2.0, -1.0, 0.0},
+        .r1 = {0.0, 0.0, -3.0},
+        .r2 = {-1.0, 1.0, 0.0},
+        .ramp_thickness = boundary_thickness,
+        .dead_thickness = dead_thickness,
+        .mu = 0.0,
+    },
+#endif
+
     // 4 sidewalls
+#if 0
     {
         .origin = {0.0, 1.5, 3.0},
         .r1 = {-3.0, 0.0, 0.0},
@@ -422,50 +469,19 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-
-    // 4 angled hopper plates
-    {
-        .origin = {0.0, -1.0, 2.0},
-        .r1 = {-3.0, 0.0, 0.0},
-        .r2 = {0.0, 1.0, 1.0},
-        .ramp_thickness = boundary_thickness,
-        .dead_thickness = dead_thickness,
-        .mu = 0.0,
-    },
-    {
-        .origin = {2.0, -1.0, 0.0},
-        .r1 = {0.0, 0.0, 3.0},
-        .r2 = {1.0, 1.0, 0.0},
-        .ramp_thickness = boundary_thickness,
-        .dead_thickness = dead_thickness,
-        .mu = 0.0,
-    },
-    {
-        .origin = {0.0, -1.0, -2.0},
-        .r1 = {3.0, 0.0, 0.0},
-        .r2 = {0.0, 1.0, -1.0},
-        .ramp_thickness = boundary_thickness,
-        .dead_thickness = dead_thickness,
-        .mu = 0.0,
-    },
-    {
-        .origin = {-2.0, -1.0, 0.0},
-        .r1 = {0.0, 0.0, -3.0},
-        .r2 = {-1.0, 1.0, 0.0},
-        .ramp_thickness = boundary_thickness,
-        .dead_thickness = dead_thickness,
-        .mu = 0.0,
-    },
-
+#endif
+#else
     // bottom collector
     {
-        .origin = {0.0, -6.0, 0.0},
-        .r1 = {10.0, 0.0, 0.0},
-        .r2 = {0.0, 0.0, -10.0},
+        // .origin = {0.0, -6.0, 0.0},
+        .origin = {0.0, -0.0, 0.0},
+        .r1 = {20.0, 0.0, 0.0},
+        .r2 = {0.0, 0.0, -20.0},
         .ramp_thickness = boundary_thickness,
         .dead_thickness = dead_thickness,
         .mu = 1.0,
     },
+#endif
 };
 
 static void bc_setup(void)
@@ -483,7 +499,7 @@ static void bc_setup(void)
     }
 
     for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
-        sd_boundary_3d_t * const entry = &b3[bi];
+        const sd_boundary_3d_t * const entry = &b3[bi];
         printf("boundary[%zu]: origin = {%.17g, %.17g, %.17g}\n", bi, entry->origin.x, entry->origin.y, entry->origin.z);
         printf("boundary[%zu]: r1 = {%.17g, %.17g, %.17g}\n", bi, entry->r1.x, entry->r1.y, entry->r1.z);
         printf("boundary[%zu]: r2 = {%.17g, %.17g, %.17g}\n", bi, entry->r2.x, entry->r2.y, entry->r2.z);
@@ -583,7 +599,7 @@ static void boundary_strength(double *strength, bool *in_dead_zone, double x, do
     }
 }
 
-void FixRHEO::initial_integrate(int /*vflag*/)
+void FixRHEO::post_force(int /*vflag*/)
 {
   // update v, x and rho of atoms in group
   int i, a, b;
@@ -611,6 +627,12 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
   if (igroup == atom->firstgroup)
     nlocal = atom->nfirst;
+
+  auto fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
+  auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
+  double **stress = stress_compute->array_atom;
 
   // hack for BCS
   // [sdunatunga] Tue 13 Feb 2024 07:53:19 AM PST
@@ -641,27 +663,97 @@ void FixRHEO::initial_integrate(int /*vflag*/)
             };
             b3_strength(&s, &in_dead_zone, &xp, entry);
 
+            stress[i][12] = s;
+            stress[i][13] = xp.x;
+            stress[i][14] = xp.y;
+            stress[i][15] = xp.z;
+            stress[i][16] = in_dead_zone;
+            stress[i][17] = bi;
+            stress[i][18] = ftest[0];
+            stress[i][19] = ftest[1];
+            stress[i][20] = ftest[2];
+            stress[i][21] = f[i][0];
+            stress[i][22] = f[i][1];
+            stress[i][23] = f[i][2];
             if (s != 0.0) {
                 // Flip normal if in the dead zone to get the right force
                 // direction.
-                if (boundaries[bi].mu == 0.0) {
+                if (entry->mu == 0.0) {
                     vector_3d_t normal = {
                         .x = entry->n3.x,
                         .y = entry->n3.y,
                         .z = entry->n3.z,
                     };
-                    if (in_dead_zone) {
-                        normal.x = -normal.x;
-                        normal.y = -normal.y;
-                        normal.z = -normal.z;
-                    }
-                    f[i][0] = normal.x * s * ftest[0] + (1.0 - s) * f[i][0];
-                    f[i][1] = normal.y * s * ftest[1] + (1.0 - s) * f[i][1];
-                    f[i][2] = normal.z * s * ftest[2] + (1.0 - s) * f[i][2];
+                    // FIXME: Is this really correct?
+                    // if (in_dead_zone) {
+                    //     // printf("IN DEAD ZONE %zu, %.17g %.17g %.17g\n", bi, xp.x, xp.y, xp.z);
+                    //     // assert(false);
+                    //     normal.x = -normal.x;
+                    //     normal.y = -normal.y;
+                    //     normal.z = -normal.z;
+                    // }
+                    const vector_3d_t vf = {
+                        .x = f[i][0],
+                        .y = f[i][1],
+                        .z = f[i][2],
+                    };
+
+                    const vector_3d_t vft = {
+                        .x = ftest[0],
+                        .y = ftest[1],
+                        .z = ftest[2],
+                    };
+
+                    const double fn_mag = dot(&vf, &normal);
+
+                    const double fn[] = {
+                        normal.x * fn_mag,
+                        normal.y * fn_mag,
+                        normal.z * fn_mag,
+                    };
+
+                    const double fw_mag = dot(&vft, &normal);
+
+                    const double fw[] = {
+                        normal.x * fw_mag,
+                        normal.y * fw_mag,
+                        normal.z * fw_mag,
+                    };
+
+                    // const double ft[] = {
+                    //     f[i][0] - fn[0],
+                    //     f[i][1] - fn[1],
+                    //     f[i][2] - fn[2],
+                    // };
+                    const double deltaf[] = {
+                        s * (fw[0] - fn[0]),
+                        s * (fw[1] - fn[1]),
+                        s * (fw[2] - fn[2]),
+                    };
+
+                    f[i][0] = deltaf[0] + f[i][0];
+                    f[i][1] = deltaf[1] + f[i][1];
+                    f[i][2] = deltaf[2] + f[i][2];
+
+                    stress[i][6] = deltaf[0];
+                    stress[i][7] = deltaf[1];
+                    stress[i][8] = deltaf[2];
                 } else {
-                    f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
-                    f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
-                    f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
+                    const double deltaf[] = {
+                        s * (ftest[0] - f[i][0]),
+                        s * (ftest[1] - f[i][1]),
+                        s * (ftest[2] - f[i][2]),
+                    };
+
+                    // printf("mu = %.17g, != 0", entry->mu);
+                    // assert(false);
+                    f[i][0] = deltaf[0] + f[i][0];
+                    f[i][1] = deltaf[1] + f[i][1];
+                    f[i][2] = deltaf[2] + f[i][2];
+
+                    stress[i][9] = deltaf[0];
+                    stress[i][10] = deltaf[1];
+                    stress[i][11] = deltaf[2];
                 }
                 // FIXME : only applies the first wall this particle checks against.
                 break;
@@ -777,6 +869,45 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 #endif
     }
   }
+}
+
+void FixRHEO::initial_integrate(int /*vflag*/)
+{
+  // update v, x and rho of atoms in group
+  int i, a, b;
+  double dtfm, divu;
+
+  int *type = atom->type;
+  int *mask = atom->mask;
+  int *status = atom->status;
+  double **x = atom->x;
+  double **v = atom->v;
+  double **f = atom->f;
+  double *rho = atom->rho;
+  double *drho = atom->drho;
+  double *mass = atom->mass;
+  double *rmass = atom->rmass;
+  double **gradr = compute_grad->gradr;
+  double **gradv = compute_grad->gradv;
+  double **vshift;
+  if (shift_flag)
+    vshift = compute_vshift->vshift;
+
+  int nlocal = atom->nlocal;
+  int rmass_flag = atom->rmass_flag;
+  int dim = domain->dimension;
+
+  if (igroup == atom->firstgroup)
+    nlocal = atom->nfirst;
+
+  auto fixes = modify->get_fix_by_style("rheo/stress");
+  if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
+  auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
+  double **stress = stress_compute->array_atom;
+
+  // [sdunatunga] Tue 23 Apr 2024 12:10:17 AM PDT
+  // post_force contents used to be here
 
   //Density Half-step
   for (i = 0; i < nlocal; i++) {

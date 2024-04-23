@@ -34,6 +34,10 @@
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 
+enum {
+    NUM_STRESS_COMPONENTS = 32,
+};
+
 // #define SD_PRINTF(args...) printf(args);
 #define SD_PRINTF(args...)
 
@@ -52,16 +56,16 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   //   else error->all(FLERR, "Illegal compute rheo/grad command, {}", arg[iarg]);
   // }
 
-  size_peratom_cols = 6;
+  size_peratom_cols = NUM_STRESS_COMPONENTS;
   peratom_flag = 1;
-  comm_forward = 6;
-  comm_reverse = 6;
+  comm_forward = NUM_STRESS_COMPONENTS;
+  comm_reverse = NUM_STRESS_COMPONENTS;
 
   nmax_store = 0;
   grow_arrays(atom->nmax);
 
   for (int i = 0; i < nmax_store; i++)
-    for (int a = 0; a < 6; a++)
+    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++)
       stress[i][a] = 0.0;
 
 }
@@ -630,7 +634,7 @@ int ComputeRHEOStress::pack_forward_comm(int n, int *list, double *buf,
   m = 0;
   for (i = 0; i < n; i++) {
     j = list[i];
-    for (k = 0; k < 6; k++)
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
       buf[m++] = stress[j][k];
   }
   return m;
@@ -645,7 +649,7 @@ void ComputeRHEOStress::unpack_forward_comm(int n, int first, double *buf)
   m = 0;
   last = first + n;
   for (i = first; i < last; i++) {
-    for (k = 0; k < 6; k++)
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
       stress[i][k] = buf[m++];
   }
 }
@@ -659,7 +663,7 @@ int ComputeRHEOStress::pack_reverse_comm(int n, int first, double *buf)
   m = 0;
   last = first + n;
   for (i = first; i < last; i++) {
-    for (k = 0; k < 6; k++)
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
       buf[m++] = stress[i][k];
   }
   return m;
@@ -674,7 +678,7 @@ void ComputeRHEOStress::unpack_reverse_comm(int n, int *list, double *buf)
   m = 0;
   for (i = 0; i < n; i++) {
     j = list[i];
-    for (k = 0; k < 6; k++)
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
       stress[j][k] += buf[m++];
   }
 }
@@ -683,7 +687,7 @@ void ComputeRHEOStress::unpack_reverse_comm(int n, int *list, double *buf)
 
 void ComputeRHEOStress::grow_arrays(int nmax)
 {
-  memory->grow(stress, nmax, 6, "rheo:stress");
+  memory->grow(stress, nmax, NUM_STRESS_COMPONENTS, "rheo:stress");
   array_atom = stress;
   nmax_store = nmax;
 }
@@ -692,5 +696,5 @@ void ComputeRHEOStress::grow_arrays(int nmax)
 
 double ComputeRHEOStress::memory_usage()
 {
-  return (size_t) nmax_store * 6 * sizeof(double);
+  return (size_t) nmax_store * NUM_STRESS_COMPONENTS * sizeof(double);
 }

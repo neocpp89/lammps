@@ -34,6 +34,7 @@ class FixRHEO : public Fix {
   void setup_pre_force(int) override;
   void setup(int) override;
   void pre_force(int) override;
+  void post_force(int) override;
   void initial_integrate(int) override;
   void final_integrate() override;
   void reset_dt() override;
