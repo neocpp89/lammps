@@ -394,7 +394,6 @@ static const sd_boundary_t boundaries[] = {
 };
 
 static sd_boundary_3d_t b3[] = {
-#if 1
     // 4 angled hopper plates
     {
         .origin = {0.0, -1.0, 2.0},
@@ -404,7 +403,6 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-#if 0
     {
         .origin = {2.0, -1.0, 0.0},
         .r1 = {0.0, 0.0, 3.0},
@@ -413,8 +411,6 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-#endif
-#if 0
     {
         .origin = {0.0, -1.0, -2.0},
         .r1 = {3.0, 0.0, 0.0},
@@ -423,8 +419,6 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-#endif
-#if 0
     {
         .origin = {-2.0, -1.0, 0.0},
         .r1 = {0.0, 0.0, -3.0},
@@ -433,10 +427,8 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-#endif
 
     // 4 sidewalls
-#if 0
     {
         .origin = {0.0, 1.5, 3.0},
         .r1 = {-3.0, 0.0, 0.0},
@@ -469,19 +461,16 @@ static sd_boundary_3d_t b3[] = {
         .dead_thickness = dead_thickness,
         .mu = 0.0,
     },
-#endif
-#else
     // bottom collector
     {
-        // .origin = {0.0, -6.0, 0.0},
-        .origin = {0.0, -0.0, 0.0},
+        .origin = {0.0, -6.0, 0.0},
+        // .origin = {0.0, -0.0, 0.0},
         .r1 = {20.0, 0.0, 0.0},
         .r2 = {0.0, 0.0, -20.0},
         .ramp_thickness = boundary_thickness,
         .dead_thickness = dead_thickness,
         .mu = 1.0,
     },
-#endif
 };
 
 static void bc_setup(void)
