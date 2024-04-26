@@ -571,6 +571,11 @@ static void b3_distance(double *distance, const vector_3d_t * const xp, const sd
     }
 }
 
+static bool is_wall_close(uint32_t wall_bitmask, size_t wall_index)
+{
+    return ((wall_bitmask & (UINT32_C(1) << wall_index)) != 0);
+}
+
 static void boundary_force_direction_from_levelset(double *strength,
                                                    vector_3d_t *direction,
                                                    uint32_t *walls_bitset,
@@ -587,6 +592,7 @@ static void boundary_force_direction_from_levelset(double *strength,
     // already part of the boundary!
     // static vector_3d_t normals[DIM(b3)] = {0};
 
+    uint32_t wb = 0;
     for (size_t bi = 0; bi < DIM(b3); ++bi) {
         const sd_boundary_3d_t * const entry = &b3[bi];
         // double s = 0.0;
@@ -595,61 +601,61 @@ static void boundary_force_direction_from_levelset(double *strength,
         // (void)in_dead_zone;
         // distances[bi] = 1.0 - s;
         b3_distance(&distances[bi], xp, entry);
-    }
 
-    bool in_any_range = false;
-    double sum_distances = 0.0;
-    double prod_distances = 1.0;
-    const double global_ramp_thickness = 0.01;
-    uint32_t wb = 0;
-    for (size_t bi = 0; bi < DIM(distances); ++bi) {
-        if (distances[bi] < global_ramp_thickness) {
-            in_any_range = true;
+        // Wrong side of the BC, set back to a far away value.
+        if (distances[bi] < 0.0) {
+            distances[bi] = DBL_MAX;
+        }
+
+        if (distances[bi] < entry->ramp_thickness) {
             wb |= (UINT32_C(1) << bi);
-            sum_distances += distances[bi];
-            prod_distances *= distances[bi];
         }
     }
 
     *walls_bitset = wb;
 
-    // if (in_any_range && sum_distances > 0.0) {
-    if (in_any_range) {
+    // At least one wall detected.
+    if (wb != 0) {
         double min_d = distances[0];
+        size_t min_wall_index = 0;
         for (size_t i = 0; i < DIM(distances); ++i) {
-            if (distances[i] < min_d) {
+            if (is_wall_close(wb, i) && (distances[i] < min_d)) {
                 min_d = distances[i];
+                min_wall_index = i;
             }
         }
-        *strength = clamp_unity(1.0 - (min_d / global_ramp_thickness));
+        // Do we want min distance, or max strength BC?
+        *strength = clamp_unity(1.0 - (min_d / b3[min_wall_index].ramp_thickness));
     } else {
         *strength = 0.0;
     }
-        // *strength = 1.0 - (prod_distances / sum_distances);
-    // } else if (in_any_range) {
-    //     *strength = 1.0;
-    // }
 
-    *direction = (vector_3d_t) {
-        0.0,
-        0.0,
-        0.0
-    };
-    for (size_t i = 0; i < DIM(distances); ++i) {
-        double pi_d = 1.0;
-        for (size_t j = 0; j < DIM(distances); ++j) {
-            if ((j != i) && (distances[j] < global_ramp_thickness)) {
-                // pi_d *= distances[i];
-                pi_d *= fabs(distances[j]);
+    if (*strength != 0.0) {
+        *direction = (vector_3d_t) {
+            0.0,
+            0.0,
+            0.0
+        };
+        for (size_t i = 0; i < DIM(distances); ++i) {
+            double pi_d = 1.0;
+            for (size_t j = 0; j < DIM(distances); ++j) {
+                // Not the current wall we're considering (chain rule), and
+                // product of all other walls that are within range.
+                if ((j != i) && is_wall_close(wb, j)) {
+                    // distances should all be positive by this point, so fabs is
+                    // unnecessary...
+                    // pi_d *= fabs(distances[j]);
+                    pi_d *= distances[j];
+                }
             }
+
+            direction->x += pi_d * b3[i].n3.x;
+            direction->y += pi_d * b3[i].n3.y;
+            direction->z += pi_d * b3[i].n3.z;
         }
 
-        direction->x += pi_d * b3[i].n3.x;
-        direction->y += pi_d * b3[i].n3.y;
-        direction->z += pi_d * b3[i].n3.z;
+        normalize(direction);
     }
-
-    normalize(direction);
 }
 
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
@@ -781,7 +787,7 @@ void FixRHEO::post_force(int /*vflag*/)
         for (size_t i = 0; i < DIM(b3); ++i) {
             const sd_boundary_3d_t * const entry = &b3[i];
             // Check if we are in contact with a sticky wall.
-            if ((walls_bitset & (UINT32_C(1) << i)) != 0) {
+            if (is_wall_close(walls_bitset, i)) {
                 is_any_wall_sticky |= (entry->mu != 0.0);
             }
         }
