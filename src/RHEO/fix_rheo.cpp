@@ -35,6 +35,7 @@
 #include "update.h"
 #include "utils.h"
 
+#include <cfloat>
 #include <cassert>
 
 using namespace LAMMPS_NS;
@@ -43,6 +44,8 @@ using namespace FixConst;
 
 // #define SD_PRINTF(args...) printf(args);
 #define SD_PRINTF(args...)
+
+#define DIM(x) (sizeof(x) / sizeof(x[0]))
 
 /* ---------------------------------------------------------------------- */
 
@@ -393,6 +396,8 @@ static const sd_boundary_t boundaries[] = {
     {3.0, 0.0, 3.0, 3.0, boundary_thickness, dead_thickness, 0.0},
 };
 
+static const double scale = 1.001;
+
 static sd_boundary_3d_t b3[] = {
     // 4 angled hopper plates
     {
@@ -477,6 +482,19 @@ static void bc_setup(void)
 {
     for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
         sd_boundary_3d_t * const entry = &b3[bi];
+        entry->origin.x *= scale;
+        entry->origin.y *= scale;
+        entry->origin.z *= scale;
+        entry->r1.x *= scale;
+        entry->r1.y *= scale;
+        entry->r1.z *= scale;
+        entry->r2.x *= scale;
+        entry->r2.y *= scale;
+        entry->r2.z *= scale;
+    }
+
+    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
+        sd_boundary_3d_t * const entry = &b3[bi];
         entry->n1 = entry->r1;
         normalize(&entry->n1);
         entry->n2 = entry->r2;
@@ -530,6 +548,108 @@ static void b3_strength(double *strength, bool *in_dead_zone, const vector_3d_t 
             }
         }
     }
+}
+
+static void b3_distance(double *distance, const vector_3d_t * const xp, const sd_boundary_3d_t * const boundary)
+{
+    // set outputs
+    *distance = DBL_MAX;
+
+    const vector_3d_t v = {
+        .x = xp->x - boundary->origin.x,
+        .y = xp->y - boundary->origin.y,
+        .z = xp->z - boundary->origin.z,
+    };
+
+    const double x1 = dot(&v, &boundary->n1);
+    if (-boundary->r1_mag <= x1 && x1 <= boundary->r1_mag) {
+        const double x2 = dot(&v, &boundary->n2);
+        if (-boundary->r2_mag <= x2 && x2 <= boundary->r2_mag) {
+            const double x3 = dot(&v, &boundary->n3);
+            *distance = x3;
+        }
+    }
+}
+
+static void boundary_force_direction_from_levelset(double *strength,
+                                                   vector_3d_t *direction,
+                                                   uint32_t *walls_bitset,
+                                                   const vector_3d_t * const xp)
+                                                   // ,
+                                                   // const sd_boundary_3d_t * const boundaries,
+                                                   // size_t num_boundaries)
+{
+    // Take the function f = prod(d_1, d_2, ...) (d_i distance from boundary i).
+    // The gradient gives us a nice direction, which can be written as
+    // sum_over_i(n_i * prod_for_j_not_equal_i(d_j)) where n_i is the normal to
+    // the boundary segment.
+    static double distances[DIM(b3)] = {0};
+    // already part of the boundary!
+    // static vector_3d_t normals[DIM(b3)] = {0};
+
+    for (size_t bi = 0; bi < DIM(b3); ++bi) {
+        const sd_boundary_3d_t * const entry = &b3[bi];
+        // double s = 0.0;
+        // bool in_dead_zone = false;
+        // b3_strength(&s, &in_dead_zone, xp, entry);
+        // (void)in_dead_zone;
+        // distances[bi] = 1.0 - s;
+        b3_distance(&distances[bi], xp, entry);
+    }
+
+    bool in_any_range = false;
+    double sum_distances = 0.0;
+    double prod_distances = 1.0;
+    const double global_ramp_thickness = 0.01;
+    uint32_t wb = 0;
+    for (size_t bi = 0; bi < DIM(distances); ++bi) {
+        if (distances[bi] < global_ramp_thickness) {
+            in_any_range = true;
+            wb |= (UINT32_C(1) << bi);
+            sum_distances += distances[bi];
+            prod_distances *= distances[bi];
+        }
+    }
+
+    *walls_bitset = wb;
+
+    // if (in_any_range && sum_distances > 0.0) {
+    if (in_any_range) {
+        double min_d = distances[0];
+        for (size_t i = 0; i < DIM(distances); ++i) {
+            if (distances[i] < min_d) {
+                min_d = distances[i];
+            }
+        }
+        *strength = clamp_unity(1.0 - (min_d / global_ramp_thickness));
+    } else {
+        *strength = 0.0;
+    }
+        // *strength = 1.0 - (prod_distances / sum_distances);
+    // } else if (in_any_range) {
+    //     *strength = 1.0;
+    // }
+
+    *direction = (vector_3d_t) {
+        0.0,
+        0.0,
+        0.0
+    };
+    for (size_t i = 0; i < DIM(distances); ++i) {
+        double pi_d = 1.0;
+        for (size_t j = 0; j < DIM(distances); ++j) {
+            if ((j != i) && (distances[j] < global_ramp_thickness)) {
+                // pi_d *= distances[i];
+                pi_d *= fabs(distances[j]);
+            }
+        }
+
+        direction->x += pi_d * b3[i].n3.x;
+        direction->y += pi_d * b3[i].n3.y;
+        direction->z += pi_d * b3[i].n3.z;
+    }
+
+    normalize(direction);
 }
 
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
@@ -636,116 +756,112 @@ void FixRHEO::post_force(int /*vflag*/)
       }
 
         const double ftest[] = {
-                -v[i][0] / dtfm,
-                -v[i][1] / dtfm,
-                -v[i][2] / dtfm,
+            -v[i][0] / dtfm,
+            -v[i][1] / dtfm,
+            -v[i][2] / dtfm,
         };
 
-        for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
-            const sd_boundary_3d_t * const entry = &b3[bi];
-            double s = 0.0;
-            bool in_dead_zone = false;
-            const vector_3d_t xp = {
-                .x = x[i][0],
-                .y = x[i][1],
-                .z = x[i][2],
-            };
-            b3_strength(&s, &in_dead_zone, &xp, entry);
+        const vector_3d_t xp = {
+            .x = x[i][0],
+            .y = x[i][1],
+            .z = x[i][2],
+        };
 
-            stress[i][12] = s;
-            stress[i][13] = xp.x;
-            stress[i][14] = xp.y;
-            stress[i][15] = xp.z;
-            stress[i][16] = in_dead_zone;
-            stress[i][17] = bi;
-            stress[i][18] = ftest[0];
-            stress[i][19] = ftest[1];
-            stress[i][20] = ftest[2];
-            stress[i][21] = f[i][0];
-            stress[i][22] = f[i][1];
-            stress[i][23] = f[i][2];
-            if (s != 0.0) {
-                // Flip normal if in the dead zone to get the right force
-                // direction.
-                if (entry->mu == 0.0) {
-                    vector_3d_t normal = {
-                        .x = entry->n3.x,
-                        .y = entry->n3.y,
-                        .z = entry->n3.z,
-                    };
-                    // FIXME: Is this really correct?
-                    // if (in_dead_zone) {
-                    //     // printf("IN DEAD ZONE %zu, %.17g %.17g %.17g\n", bi, xp.x, xp.y, xp.z);
-                    //     // assert(false);
-                    //     normal.x = -normal.x;
-                    //     normal.y = -normal.y;
-                    //     normal.z = -normal.z;
-                    // }
-                    const vector_3d_t vf = {
-                        .x = f[i][0],
-                        .y = f[i][1],
-                        .z = f[i][2],
-                    };
+        vector_3d_t fdir = {
+            0.0,
+            0.0,
+            0.0,
+        };
 
-                    const vector_3d_t vft = {
-                        .x = ftest[0],
-                        .y = ftest[1],
-                        .z = ftest[2],
-                    };
+        double s = 0.0;
+        uint32_t walls_bitset = 0;
+        boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
 
-                    const double fn_mag = dot(&vf, &normal);
+        bool is_any_wall_sticky = false;
+        for (size_t i = 0; i < DIM(b3); ++i) {
+            const sd_boundary_3d_t * const entry = &b3[i];
+            // Check if we are in contact with a sticky wall.
+            if ((walls_bitset & (UINT32_C(1) << i)) != 0) {
+                is_any_wall_sticky |= (entry->mu != 0.0);
+            }
+        }
 
-                    const double fn[] = {
-                        normal.x * fn_mag,
-                        normal.y * fn_mag,
-                        normal.z * fn_mag,
-                    };
+        stress[i][12] = s;
+        stress[i][13] = xp.x;
+        stress[i][14] = xp.y;
+        stress[i][15] = xp.z;
+        // stress[i][16] = in_dead_zone;
+        stress[i][17] = walls_bitset;
+        stress[i][18] = ftest[0];
+        stress[i][19] = ftest[1];
+        stress[i][20] = ftest[2];
+        stress[i][21] = f[i][0];
+        stress[i][22] = f[i][1];
+        stress[i][23] = f[i][2];
+        stress[i][24] = fdir.x;
+        stress[i][25] = fdir.y;
+        stress[i][26] = fdir.z;
+        if (s != 0.0) {
+            // We can slide along all walls in this contact, so we need a
+            // direction.
+            if (!is_any_wall_sticky) {
+                const vector_3d_t normal = fdir;
 
-                    const double fw_mag = dot(&vft, &normal);
+                const vector_3d_t vf = {
+                    .x = f[i][0],
+                    .y = f[i][1],
+                    .z = f[i][2],
+                };
 
-                    const double fw[] = {
-                        normal.x * fw_mag,
-                        normal.y * fw_mag,
-                        normal.z * fw_mag,
-                    };
+                const vector_3d_t vft = {
+                    .x = ftest[0],
+                    .y = ftest[1],
+                    .z = ftest[2],
+                };
 
-                    // const double ft[] = {
-                    //     f[i][0] - fn[0],
-                    //     f[i][1] - fn[1],
-                    //     f[i][2] - fn[2],
-                    // };
-                    const double deltaf[] = {
-                        s * (fw[0] - fn[0]),
-                        s * (fw[1] - fn[1]),
-                        s * (fw[2] - fn[2]),
-                    };
+                const double fn_mag = dot(&vf, &normal);
 
-                    f[i][0] = deltaf[0] + f[i][0];
-                    f[i][1] = deltaf[1] + f[i][1];
-                    f[i][2] = deltaf[2] + f[i][2];
+                const double fn[] = {
+                    normal.x * fn_mag,
+                    normal.y * fn_mag,
+                    normal.z * fn_mag,
+                };
 
-                    stress[i][6] = deltaf[0];
-                    stress[i][7] = deltaf[1];
-                    stress[i][8] = deltaf[2];
-                } else {
-                    const double deltaf[] = {
-                        s * (ftest[0] - f[i][0]),
-                        s * (ftest[1] - f[i][1]),
-                        s * (ftest[2] - f[i][2]),
-                    };
+                const double fw_mag = dot(&vft, &normal);
 
-                    // printf("mu = %.17g, != 0", entry->mu);
-                    // assert(false);
-                    f[i][0] = deltaf[0] + f[i][0];
-                    f[i][1] = deltaf[1] + f[i][1];
-                    f[i][2] = deltaf[2] + f[i][2];
+                const double fw[] = {
+                    normal.x * fw_mag,
+                    normal.y * fw_mag,
+                    normal.z * fw_mag,
+                };
 
-                    stress[i][9] = deltaf[0];
-                    stress[i][10] = deltaf[1];
-                    stress[i][11] = deltaf[2];
-                }
-                // FIXME : only applies the first wall this particle checks against.
-                break;
+                const double deltaf[] = {
+                    s * (fw[0] - fn[0]),
+                    s * (fw[1] - fn[1]),
+                    s * (fw[2] - fn[2]),
+                };
+
+                f[i][0] = deltaf[0] + f[i][0];
+                f[i][1] = deltaf[1] + f[i][1];
+                f[i][2] = deltaf[2] + f[i][2];
+
+                stress[i][6] = deltaf[0];
+                stress[i][7] = deltaf[1];
+                stress[i][8] = deltaf[2];
+            } else {
+                const double deltaf[] = {
+                    s * (ftest[0] - f[i][0]),
+                    s * (ftest[1] - f[i][1]),
+                    s * (ftest[2] - f[i][2]),
+                };
+
+                f[i][0] = deltaf[0] + f[i][0];
+                f[i][1] = deltaf[1] + f[i][1];
+                f[i][2] = deltaf[2] + f[i][2];
+
+                stress[i][9] = deltaf[0];
+                stress[i][10] = deltaf[1];
+                stress[i][11] = deltaf[2];
             }
         }
 
