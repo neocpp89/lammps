@@ -43,6 +43,7 @@ class FixRHEOStress : public Fix {
   char *id_compute, *id_fix;
   // class Compute *stress_compute;
   class FixStoreAtom *store_fix;
+  std::string property_list_for_compute;
 };
 
 }    // namespace LAMMPS_NS

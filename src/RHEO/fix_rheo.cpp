@@ -470,8 +470,8 @@ static sd_boundary_3d_t b3[] = {
     {
         .origin = {0.0, -6.0, 0.0},
         // .origin = {0.0, -0.0, 0.0},
-        .r1 = {20.0, 0.0, 0.0},
-        .r2 = {0.0, 0.0, -20.0},
+        .r1 = {40.0, 0.0, 0.0},
+        .r2 = {0.0, 0.0, -40.0},
         .ramp_thickness = boundary_thickness,
         .dead_thickness = dead_thickness,
         .mu = 1.0,

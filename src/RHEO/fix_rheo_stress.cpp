@@ -33,13 +33,65 @@
 using namespace LAMMPS_NS;
 using namespace FixConst;
 
+#if !defined(DIM)
+#define DIM(x) (sizeof(x) / sizeof(x[0]))
+#endif
+
+struct material_property {
+  bool required;
+  const char *name;
+  double value;
+  bool set_by_input_file;
+};
+
 /* ---------------------------------------------------------------------- */
 
 FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   id_compute(nullptr), id_fix(nullptr), stress_compute(nullptr), store_fix(nullptr), Fix(lmp, narg, arg)
 {
-  if (narg != 3) error->all(FLERR,"Illegal fix rheo/stress command");
+  struct material_property properties[] = {
+    { .required = true, .name = "rho_critical", .value = 1.0, .set_by_input_file = false, },
+    { .required = true, .name = "E", .value = 1e4, .set_by_input_file = false, },
+    { .required = true, .name = "nu", .value = 0.0, .set_by_input_file = false, },
+    { .required = true, .name = "cohesion", .value = 0.0, .set_by_input_file = false, },
+    { .required = true, .name = "grains_d", .value = 0.005, .set_by_input_file = false, },
+    { .required = true, .name = "grains_rho", .value = 2450.0, .set_by_input_file = false, },
+    { .required = true, .name = "mu_s", .value = 0.3819, .set_by_input_file = false, },
+    { .required = true, .name = "mu_2", .value = 0.6435, .set_by_input_file = false, },
+    { .required = true, .name = "I_0", .value = 0.278, .set_by_input_file = false, },
+  };
+
   comm_forward = 6;
+
+  int iarg = 3;
+  while (iarg < narg) {
+    bool found_property_name = false;
+    const int extra_arg = 1;
+    if((iarg + extra_arg) >= narg) {
+      error->all(FLERR, "Not enough remaining arguments in fix/rheo/stress -- are all property names paired with values?");
+    }
+    for (size_t i = 0; i < DIM(properties); ++i) {
+      struct material_property * const entry = &properties[i];
+      if (strcmp(arg[iarg], entry->name) == 0) {
+        entry->value = utils::numeric(FLERR, arg[iarg + 1], /*do_abort=*/true, lmp);
+        entry->set_by_input_file = true;
+        found_property_name = true;
+        iarg += extra_arg;
+        break;
+      }
+    }
+    if (!found_property_name) {
+      error->all(FLERR, "fix/rheo/stress does not know property named: {}", arg[iarg]);
+    }
+    ++iarg;
+  }
+
+  // Will include a trailing space, hopefully ok.
+  property_list_for_compute = "";
+  for (size_t i = 0; i < DIM(properties); ++i) {
+    struct material_property * const entry = &properties[i];
+    property_list_for_compute += fmt::format("{} {:.17g} ", entry->name, entry->value);
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -61,7 +113,7 @@ void FixRHEOStress::post_constructor()
 
   id_compute = utils::strdup(std::string(id) + "_compute");
   // stress_compute = modify->add_compute(fmt::format("{} {} stress/atom NULL ke pair bond", id_compute, group->names[igroup]));
-  stress_compute = modify->add_compute(fmt::format("{} {} RHEO/STRESS", id_compute, group->names[igroup]));
+  stress_compute = modify->add_compute(fmt::format("{} {} RHEO/STRESS {}", id_compute, group->names[igroup], property_list_for_compute));
 }
 
 /* ---------------------------------------------------------------------- */

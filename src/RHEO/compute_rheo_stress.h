@@ -51,6 +51,22 @@ class ComputeRHEOStress : public Compute {
   class NeighList *list;
 
   void grow_arrays(int);
+
+  // Set by input file
+  double RHO_CRITICAL;
+  double E;
+  double NU;
+  double COHESION;
+  double GRAINS_D;
+  double GRAINS_RHO;
+  double MU_S;
+  double MU_2;
+  double I_0;
+
+  // Derived elastic parameters
+  double G;
+  double K;
+  double LAMBDA;
 };
 
 }    // namespace LAMMPS_NS

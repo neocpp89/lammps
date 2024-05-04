@@ -34,12 +34,23 @@
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
 
+#if !defined(DIM)
+#define DIM(x) (sizeof(x) / sizeof(x[0]))
+#endif
+
 enum {
     NUM_STRESS_COMPONENTS = 32,
 };
 
 // #define SD_PRINTF(args...) printf(args);
 #define SD_PRINTF(args...)
+
+struct compute_material_property {
+    bool required;
+    const char *name;
+    double *value;
+    bool seen;
+};
 
 /* ---------------------------------------------------------------------- */
 ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
@@ -55,6 +66,43 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   //   else if (strcmp(arg[iarg],"viscosity") == 0) eta_flag = 1;
   //   else error->all(FLERR, "Illegal compute rheo/grad command, {}", arg[iarg]);
   // }
+
+  struct compute_material_property properties[] = {
+    { .required = true, .name = "rho_critical", .value = &RHO_CRITICAL, },
+    { .required = true, .name = "E", .value = &E,},
+    { .required = true, .name = "nu", .value = &NU, },
+    { .required = true, .name = "cohesion", .value = &COHESION, },
+    { .required = true, .name = "grains_d", .value = &GRAINS_D, },
+    { .required = true, .name = "grains_rho", .value = &GRAINS_RHO, },
+    { .required = true, .name = "mu_s", .value = &MU_S, },
+    { .required = true, .name = "mu_2", .value = &MU_2, },
+    { .required = true, .name = "I_0", .value = &I_0, },
+  };
+
+  for (size_t iarg = 3; iarg < narg; ++iarg) {
+    const int extra_arg = 1;
+    if((iarg + extra_arg) >= narg) {
+      error->all(FLERR, "Not enough remaining arguments in fix/rheo/stress -- are all property names paired with values?");
+    }
+    for (size_t i = 0; i < DIM(properties); ++i) {
+      struct compute_material_property * const entry = &properties[i];
+      if (strcmp(arg[iarg], entry->name) == 0) {
+        *(entry->value) = utils::numeric(FLERR, arg[iarg + 1], /*do_abort=*/true, lmp);
+        entry->seen = true;
+        iarg += extra_arg;
+        break;
+      }
+    }
+  }
+  // RHO_CRITICAL = 1.0;
+  // E = 1e4;
+  // NU = 0.0;
+  // COHESION = 0.0;
+  // GRAINS_D = 0.005;
+  // GRAINS_RHO = 2450.0;
+  // MU_S = 1.0;
+  // MU_2 = 1.0;
+  // I_0 = 0.278;
 
   size_peratom_cols = NUM_STRESS_COMPONENTS;
   peratom_flag = 1;
@@ -79,10 +127,37 @@ ComputeRHEOStress::~ComputeRHEOStress()
 
 /* ---------------------------------------------------------------------- */
 
-static void set_material_params(void);
+#define DUMP_PROPERTY(x) printf("%s = %.17g\n", #x, x)
+
 void ComputeRHEOStress::init()
 {
-  set_material_params();
+  // RHO_CRITICAL = 1.0;
+  // E = 1e4;
+  // NU = 0.0;
+  // COHESION = 0.0;
+  // GRAINS_D = 0.005;
+  // GRAINS_RHO = 2450.0;
+  // MU_S = 1.0;
+  // MU_2 = 1.0;
+  // I_0 = 0.278;
+
+  G = E / (2.0 * (1.0 + NU));
+  K = E / (3.0 * (1.0 - 2*NU));
+  LAMBDA = K - 2.0 * G / 3.0;
+
+  DUMP_PROPERTY(RHO_CRITICAL);
+  DUMP_PROPERTY(E);
+  DUMP_PROPERTY(NU);
+  DUMP_PROPERTY(COHESION);
+  DUMP_PROPERTY(GRAINS_D);
+  DUMP_PROPERTY(GRAINS_RHO);
+  DUMP_PROPERTY(MU_S);
+  DUMP_PROPERTY(MU_2);
+  DUMP_PROPERTY(I_0);
+  DUMP_PROPERTY(G);
+  DUMP_PROPERTY(K);
+  DUMP_PROPERTY(LAMBDA);
+
   one_element_test();
 }
 
@@ -269,34 +344,25 @@ static void multiply(double *C, const double *A, const double *B)
 }
 
 // Material parameters (to be set by fix arguments..).
-const static double RHO_CRITICAL = 1.0;
-// const static double RHO_CRITICAL = 1500.0;
-// const static double E = 1e5;
-const static double E = 1e4;
-// const static double E = 1e3;
-// const static double NU = 0.3;
-const static double NU = 0.0;
-const static double COHESION = 0.0;
-const static double GRAINS_D = 0.005;
-const static double GRAINS_RHO = 2450.0;
-const static double MU_S = 0.3819;
-const static double MU_2 = 0.6435;
-const static double I_0 = 0.278;
+// const static double RHO_CRITICAL = 1.0;
+// const static double E = 1e4;
+// const static double NU = 0.0;
+// const static double COHESION = 0.0;
+// const static double GRAINS_D = 0.005;
+// const static double GRAINS_RHO = 2450.0;
+// // const static double MU_S = 0.3819;
+// // const static double MU_2 = 0.6435;
+// const static double MU_S = 1.0;
+// const static double MU_2 = 1.0;
+// const static double I_0 = 0.278;
 
 // Derived elastic parameters
 // static double G = 0;
 // static double K = 0;
 // static double LAMBDA = 0;
-static const double K = E / (3.0 * (1.0 - 2*NU));
-static const double G = E / (2.0 * (1.0 + NU));
-static const double LAMBDA = K - (2.0 * G / 3.0);
-
-static void set_material_params(void)
-{
-  // G = E / (2.0 * (1.0 + NU));
-  // K = E / (3.0 * (1.0 - 2*NU));
-  // LAMBDA = K - 2.0 * G / 3.0;
-}
+// static const double K = E / (3.0 * (1.0 - 2*NU));
+// static const double G = E / (2.0 * (1.0 + NU));
+// static const double LAMBDA = K - (2.0 * G / 3.0);
 
 void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_stress,
     const double *velocity_gradient, double density, double dt, int dim)
