@@ -127,7 +127,7 @@ ComputeRHEOStress::~ComputeRHEOStress()
 
 /* ---------------------------------------------------------------------- */
 
-#define DUMP_PROPERTY(x) printf("%s = %.17g\n", #x, x)
+#define DUMP_PROPERTY(x) SD_PRINTF("%s = %.17g\n", #x, x)
 
 void ComputeRHEOStress::init()
 {
@@ -158,7 +158,7 @@ void ComputeRHEOStress::init()
   DUMP_PROPERTY(K);
   DUMP_PROPERTY(LAMBDA);
 
-  one_element_test();
+  // one_element_test();
 }
 
 /* ---------------------------------------------------------------------- */

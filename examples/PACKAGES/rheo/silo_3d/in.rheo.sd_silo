@@ -55,7 +55,7 @@ pair_coeff         * *
 
 fix                1 fluid addforce 0.0 -${fext} 0.0
 fix                2 all balance 1000 1.1 rcb
-fix                3 all rheo ${cut} cubic 32 surface/detection coordination 80 10 density ${rho0} ${rho0} boundary/stlfile boundaries.stl boundary/stickybitmask 0x0F
+fix                3 all rheo ${cut} cubic 32 surface/detection coordination 80 10 density ${rho0} ${rho0} boundary/stlfile silo.stl boundary/stickybitmask 0x03
 fix                4 all rheo/viscosity * constant ${eta}
 fix                5 all rheo/pressure * linear
 fix                6 all rheo/stress mu_s 0.6 mu_2 0.6
@@ -73,8 +73,8 @@ variable           skin equal 0.2*${cut}
 neighbor           ${skin} bin
 neigh_modify       one 5000
 
-dump               1 all custom 1000 atomDump_periodic id type x y z vx vy vz fx fy fz c_1[*] c_6_compute[*] c_mycompute[*]
-dump               dmpvtk all vtk 1000 dump/dump*.vtk id type x y z vx vy vz fx fy fz
+dump               1 all custom 1000 atomDump_silo id type x y z vx vy vz fx fy fz c_1[*] c_6_compute[*] c_mycompute[*]
+dump               dmpvtk all vtk 1000 silo_vtk/dump*.vtk id type x y z vx vy vz fx fy fz
 
 # run                1000
 run                1000000

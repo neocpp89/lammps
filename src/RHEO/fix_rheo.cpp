@@ -47,6 +47,30 @@ using namespace FixConst;
 
 #define DIM(x) (sizeof(x) / sizeof(x[0]))
 
+typedef struct {
+    double x;
+    double y;
+    double z;
+} vector_3d_t;
+
+typedef struct {
+    vector_3d_t normal;
+    vector_3d_t a;
+    vector_3d_t b;
+    vector_3d_t c;
+    bool sticky;
+    double thickness;
+} stl_facet_t;
+
+static stl_facet_t loaded_facets[1024] = {0};
+static size_t num_loaded_facets = 0;
+static double boundary_thickness = 0.01;
+static uint64_t sticky_bitmask = 0;
+
+static void normalize(vector_3d_t *v);
+static void print_facet(const stl_facet_t * const facet);
+static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp);
+
 /* ---------------------------------------------------------------------- */
 
 FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
@@ -67,6 +91,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
 
   int i;
   int n = atom->ntypes;
+  FILE *boundary_fp = NULL;
   memory->create(rho0, n + 1, "rheo:rho0");
   memory->create(csq, n + 1, "rheo:csq");
   for (i = 1; i <= n; i++) {
@@ -135,6 +160,19 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       for (i = 1; i <= n; i++)
         rho0[i] = utils::numeric(FLERR, arg[iarg + i], false, lmp);
       iarg += n;
+    } else if (strcmp(arg[iarg], "boundary/stlfile") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal stlfile option in fix rheo");
+      boundary_fp = fopen(arg[iarg + 1], "r");
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/rampthickness") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal ramp thickness option in fix rheo");
+      boundary_thickness  = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/stickybitmask") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal sticky bc option in fix rheo");
+      // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      sticky_bitmask = strtoull(arg[iarg + 1], NULL, 0);
+      iarg += 1;
     } else if (strcmp(arg[iarg], "speed/sound") == 0) {
       if (iarg + n >= narg) error->all(FLERR, "Illegal csq option in fix rheo");
       for (i = 1; i <= n; i++) {
@@ -146,6 +184,21 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       error->all(FLERR, "Illegal fix rheo command: {}", arg[iarg]);
     }
     iarg += 1;
+  }
+
+  if (boundary_fp != NULL) {
+    num_loaded_facets = DIM(loaded_facets);
+    parse_stl_file(loaded_facets, &num_loaded_facets, boundary_fp);
+    for (size_t i = 0; i < num_loaded_facets; ++i) {
+        if ((i < 64) && (sticky_bitmask & (UINT64_C(1) << i) != 0)) {
+            loaded_facets[i].sticky = true;
+            loaded_facets[i].thickness = boundary_thickness;
+            normalize(&loaded_facets[i].normal);
+        }
+        printf("facet %zu:\n", i);
+        print_facet(&loaded_facets[i]);
+    }
+    fclose(boundary_fp);
   }
 }
 
@@ -316,12 +369,6 @@ typedef struct {
     double mu;
 } sd_boundary_t;
 
-typedef struct {
-    double x;
-    double y;
-    double z;
-} vector_3d_t;
-
 // Normal formed from r1 x r2. ramp_thickness is along positive normal and
 // dead_thickness is along negative normal. r1 and r2 are HALF of the distance
 // in each dimension of the bounding rectangular prism.
@@ -360,6 +407,24 @@ static void normalize(vector_3d_t *v)
     v->z /= d;
 }
 
+static void cross(vector_3d_t * const result,
+                  const vector_3d_t * const a,
+                  const vector_3d_t * const b)
+{
+    result->x =  ((a->y * b->z) - (a->z * b->y));
+    result->y = -((a->x * b->z) - (a->z * b->x));
+    result->z =  ((a->x * b->y) - (a->y * b->x));
+}
+
+static void vsub(vector_3d_t * const result,
+                 const vector_3d_t * const a,
+                 const vector_3d_t * const b)
+{
+    result->x = a->x - b->x;
+    result->y = a->y - b->y;
+    result->z = a->z - b->z;
+}
+
 static vector_3d_t compute_normal(const vector_3d_t * const r1, const vector_3d_t * const r2)
 {
     vector_3d_t n = {
@@ -374,8 +439,36 @@ static vector_3d_t compute_normal(const vector_3d_t * const r1, const vector_3d_
     return n;
 }
 
-// static const double boundary_thickness = 0.1;
-static const double boundary_thickness = 0.01;
+// This function will only work if p is in the plane given by a, b, c. This
+// should be okay since we'll use the boundary layer check first to get the
+// distance, which can use to project down into this plane outside this
+// function.
+static bool is_projected_point_in_triangle_3d(const vector_3d_t * const p,
+                                              const vector_3d_t * const a,
+                                              const vector_3d_t * const b,
+                                              const vector_3d_t * const c)
+{
+    // vectors from P to x.
+    vector_3d_t v_pa = {0};
+    vector_3d_t v_pb = {0};
+    vector_3d_t v_pc = {0};
+    vsub(&v_pa, a, p);
+    vsub(&v_pb, b, p);
+    vsub(&v_pc, c, p);
+
+    // cross products for various sub triangles to get normals
+    vector_3d_t s_ab = {0};
+    vector_3d_t s_bc = {0};
+    vector_3d_t s_ca = {0};
+    cross(&s_ab, &v_pa, &v_pb);
+    cross(&s_bc, &v_pb, &v_pc);
+    cross(&s_ca, &v_pc, &v_pa);
+
+    const bool s1 = dot(&s_ab, &s_bc) > 0;
+    const bool s2 = dot(&s_ca, &s_bc) > 0;
+    return (s1 && s2);
+}
+
 static const double dead_thickness = 0.1;
 
 static const sd_boundary_t boundaries[] = {
@@ -478,8 +571,151 @@ static sd_boundary_3d_t b3[] = {
     },
 };
 
+enum stl_parser_expect_states {
+    EXPECT_HEADER,
+    EXPECT_FACET,
+    EXPECT_LOOP,
+    EXPECT_VERTEX,
+    EXPECT_ENDLOOP,
+    EXPECT_ENDFACET,
+    AT_CAPACITY,
+};
+
+static void parse_vector_3d(vector_3d_t *v, const char *s)
+{
+    assert(v != NULL);
+    assert(s != NULL);
+
+    const char *delim = " \t";
+    size_t component = 0;
+    char s_copy[1024] = {0};
+    strncpy(s_copy, s, sizeof(s_copy));
+    char *tok = strtok(s_copy, delim);
+    while (tok != NULL) {
+        if (component < 3) {
+            double value = 0;
+            int result = sscanf(tok, "%lg", &value);
+            assert(result == 1);
+            switch(component) {
+                case 0: v->x = value; break;
+                case 1: v->y = value; break;
+                case 2: v->z = value; break;
+            }
+        }
+        component++;
+        tok = strtok(NULL, delim);
+    }
+}
+
+static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp)
+{
+    assert(facets != NULL);
+    assert(num_facets != NULL);
+    assert(fp != NULL);
+
+    char line[256] = {0};
+    size_t vertex_number = 0;
+
+    const size_t capacity = *num_facets;
+    *num_facets = 0;
+
+    enum stl_parser_expect_states state = EXPECT_HEADER;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        printf("LINE: %s", line);
+        printf("STATE: %d\n", state);
+        stl_facet_t * const entry = &facets[*num_facets];
+        switch (state) {
+            case EXPECT_HEADER: {
+                if (strncmp(line, "solid", 5) == 0) {
+                    state = EXPECT_FACET;
+                }
+            } break;
+            case EXPECT_FACET: {
+                if (strncmp(line, "facet normal ", 13) == 0) {
+                    char *nx_start = &line[13];
+                    parse_vector_3d(&entry->normal, nx_start);
+                    state = EXPECT_LOOP;
+                }
+            } break;
+            case EXPECT_LOOP: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "outer loop", 10) == 0) {
+                    vertex_number = 0;
+                    state = EXPECT_VERTEX;
+                }
+            } break;
+            case EXPECT_VERTEX: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "vertex ", 7) == 0) {
+                    vector_3d_t v = {0};
+                    parse_vector_3d(&v, &line[skip+7]);
+                    switch (vertex_number) {
+                        case 0: entry->a = v; break;
+                        case 1: entry->b = v; break;
+                        case 2: entry->c = v; break;
+                    };
+                    vertex_number++;
+
+                    if (vertex_number >= 3) {
+                        state = EXPECT_ENDLOOP;
+                    }
+                }
+            } break;
+            case EXPECT_ENDLOOP: {
+                size_t skip = 0;
+                while ((line[skip] != 0) && isspace(line[skip])) {
+                    skip++;
+                }
+                if (strncmp(&line[skip], "endloop", 7) == 0) {
+                    state = EXPECT_ENDFACET;
+                }
+            } break;
+            case EXPECT_ENDFACET: {
+                if (strncmp(line, "endfacet", 8) == 0) {
+                    (*num_facets)++;
+                    if (*num_facets >= capacity) {
+                        state = AT_CAPACITY;
+                    } else {
+                        state = EXPECT_FACET;
+                    }
+                }
+            } break;
+            case AT_CAPACITY: break;
+        }
+        // TODO: Should check for an "endsolid" line...
+    }
+
+    return true;
+}
+
+static void print_vector(const vector_3d_t * const v)
+{
+    printf("{%.17g, %.17g, %.17g}\n", v->x, v->y, v->z);
+}
+
+static void print_facet(const stl_facet_t * const facet)
+{
+    printf("  normal = ");
+    print_vector(&facet->normal);
+    printf("  a = ");
+    print_vector(&facet->a);
+    printf("  b = ");
+    print_vector(&facet->b);
+    printf("  c = ");
+    print_vector(&facet->c);
+    printf("  sticky = %s\n", facet->sticky ? "yes" : "no");
+    printf("  thickness = %g\n", facet->thickness);
+}
+
 static void bc_setup(void)
 {
+/*
     for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
         sd_boundary_3d_t * const entry = &b3[bi];
         entry->origin.x *= scale;
@@ -520,34 +756,33 @@ static void bc_setup(void)
         printf("boundary[%zu]: r2_mag = %.17g\n", bi, entry->r2_mag);
         printf("---\n");
     }
+*/
 }
 
-static void b3_strength(double *strength, bool *in_dead_zone, const vector_3d_t * const xp, const sd_boundary_3d_t * const boundary)
+static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet)
 {
     // set outputs
-    *strength = 0.0;
-    *in_dead_zone = false;
+    *distance = DBL_MAX;
 
     const vector_3d_t v = {
-        .x = xp->x - boundary->origin.x,
-        .y = xp->y - boundary->origin.y,
-        .z = xp->z - boundary->origin.z,
+        .x = xp->x - facet->a.x,
+        .y = xp->y - facet->a.y,
+        .z = xp->z - facet->a.z,
     };
 
-    const double x1 = dot(&v, &boundary->n1);
-    if (-boundary->r1_mag <= x1 && x1 <= boundary->r1_mag) {
-        const double x2 = dot(&v, &boundary->n2);
-        if (-boundary->r2_mag <= x2 && x2 <= boundary->r2_mag) {
-            const double x3 = dot(&v, &boundary->n3);
-            if (-boundary->dead_thickness <= x3 && x3 <= 0) {
-                *strength = 1.0;
-                *in_dead_zone = true;
-            } else if (0 < x3 && x3 <= boundary->ramp_thickness) {
-                *strength = clamp_unity(1.0 - (x3 / boundary->ramp_thickness));
-                *in_dead_zone = false;
-            }
+    const double x3 = dot(&v, &facet->normal);
+    if (0.0 <= x3 && x3 <= 5.0 * facet->thickness) {
+        const vector_3d_t p = {
+            .x = xp->x - x3 * facet->normal.x,
+            .y = xp->y - x3 * facet->normal.y,
+            .z = xp->z - x3 * facet->normal.z,
+        };
+        if (is_projected_point_in_triangle_3d(&p, &facet->a, &facet->b, &facet->c)) {
+            // const double x3 = dot(&v, &facet->normal);
+            *distance = x3;
         }
     }
+
 }
 
 static void b3_distance(double *distance, const vector_3d_t * const xp, const sd_boundary_3d_t * const boundary)
@@ -571,9 +806,19 @@ static void b3_distance(double *distance, const vector_3d_t * const xp, const sd
     }
 }
 
-static bool is_wall_close(uint32_t wall_bitmask, size_t wall_index)
+static void clear_wall_bitset(uint32_t *wall_bitset)
 {
-    return ((wall_bitmask & (UINT32_C(1) << wall_index)) != 0);
+    *wall_bitset = 0;
+}
+
+static bool is_wall_close(uint32_t wall_bitset, size_t wall_index)
+{
+    return ((wall_bitset & (UINT32_C(1) << wall_index)) != 0);
+}
+
+static void set_wall_bitset(uint32_t *wall_bitset, size_t wall_index)
+{
+    *wall_bitset |= (UINT32_C(1) << wall_index);
 }
 
 static void boundary_force_direction_from_levelset(double *strength,
@@ -588,27 +833,22 @@ static void boundary_force_direction_from_levelset(double *strength,
     // The gradient gives us a nice direction, which can be written as
     // sum_over_i(n_i * prod_for_j_not_equal_i(d_j)) where n_i is the normal to
     // the boundary segment.
-    static double distances[DIM(b3)] = {0};
+    static double distances[DIM(loaded_facets)] = {0};
     // already part of the boundary!
     // static vector_3d_t normals[DIM(b3)] = {0};
 
     uint32_t wb = 0;
-    for (size_t bi = 0; bi < DIM(b3); ++bi) {
-        const sd_boundary_3d_t * const entry = &b3[bi];
-        // double s = 0.0;
-        // bool in_dead_zone = false;
-        // b3_strength(&s, &in_dead_zone, xp, entry);
-        // (void)in_dead_zone;
-        // distances[bi] = 1.0 - s;
-        b3_distance(&distances[bi], xp, entry);
+    for (size_t bi = 0; bi < num_loaded_facets; ++bi) {
+        const stl_facet_t * const entry = &loaded_facets[bi];
+        stl_facet_distance(&distances[bi], xp, entry);
 
         // Wrong side of the BC, set back to a far away value.
         if (distances[bi] < 0.0) {
             distances[bi] = DBL_MAX;
         }
 
-        if (distances[bi] < entry->ramp_thickness) {
-            wb |= (UINT32_C(1) << bi);
+        if (distances[bi] < entry->thickness) {
+            set_wall_bitset(&wb, bi);
         }
     }
 
@@ -618,14 +858,17 @@ static void boundary_force_direction_from_levelset(double *strength,
     if (wb != 0) {
         double min_d = distances[0];
         size_t min_wall_index = 0;
-        for (size_t i = 0; i < DIM(distances); ++i) {
+        for (size_t i = 0; i < num_loaded_facets; ++i) {
             if (is_wall_close(wb, i) && (distances[i] < min_d)) {
                 min_d = distances[i];
                 min_wall_index = i;
             }
         }
         // Do we want min distance, or max strength BC?
-        *strength = clamp_unity(1.0 - (min_d / b3[min_wall_index].ramp_thickness));
+        // *strength = clamp_unity(1.0 - (min_d / loaded_facets[min_wall_index].thickness));
+        // Clip the last closest tenth so there's a bit of dead zone where the
+        // BC is at full strength.
+        *strength = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
     } else {
         *strength = 0.0;
     }
@@ -636,9 +879,9 @@ static void boundary_force_direction_from_levelset(double *strength,
             0.0,
             0.0
         };
-        for (size_t i = 0; i < DIM(distances); ++i) {
+        for (size_t i = 0; i < num_loaded_facets; ++i) {
             double pi_d = 1.0;
-            for (size_t j = 0; j < DIM(distances); ++j) {
+            for (size_t j = 0; j < num_loaded_facets; ++j) {
                 // Not the current wall we're considering (chain rule), and
                 // product of all other walls that are within range.
                 if ((j != i) && is_wall_close(wb, j)) {
@@ -649,9 +892,9 @@ static void boundary_force_direction_from_levelset(double *strength,
                 }
             }
 
-            direction->x += pi_d * b3[i].n3.x;
-            direction->y += pi_d * b3[i].n3.y;
-            direction->z += pi_d * b3[i].n3.z;
+            direction->x += pi_d * loaded_facets[i].normal.x;
+            direction->y += pi_d * loaded_facets[i].normal.y;
+            direction->z += pi_d * loaded_facets[i].normal.z;
         }
 
         normalize(direction);
@@ -784,11 +1027,11 @@ void FixRHEO::post_force(int /*vflag*/)
         boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
 
         bool is_any_wall_sticky = false;
-        for (size_t i = 0; i < DIM(b3); ++i) {
-            const sd_boundary_3d_t * const entry = &b3[i];
+        for (size_t i = 0; i < num_loaded_facets; ++i) {
+            const stl_facet_t * const entry = &loaded_facets[i];
             // Check if we are in contact with a sticky wall.
             if (is_wall_close(walls_bitset, i)) {
-                is_any_wall_sticky |= (entry->mu != 0.0);
+                is_any_wall_sticky |= entry->sticky;
             }
         }
 
@@ -870,114 +1113,6 @@ void FixRHEO::post_force(int /*vflag*/)
                 stress[i][11] = deltaf[2];
             }
         }
-
-// 2D BC only
-#if 0
-        for (size_t bi = 0; bi < sizeof(boundaries)/sizeof(boundaries[0]); ++bi) {
-            double s = 0.0;
-            bool in_dead_zone = false;
-            boundary_strength(&s, &in_dead_zone, x[i][0], x[i][1], &boundaries[bi]);
-
-            if (s != 0.0) {
-                double n[3] = {
-                    0.0,
-                    0.0,
-                    0.0,
-                };
-
-                // Flip normal if in the dead zone to get the right force
-                // direction.
-                if (boundaries[bi].mu == 0.0) {
-                    boundary_normal(&n[0], &n[1], &boundaries[bi]);
-                    if (in_dead_zone) {
-                        n[0] = -n[0];
-                        n[1] = -n[1];
-                        n[2] = -n[2];
-                    }
-                    f[i][0] = n[0] * s * ftest[0] + (1.0 - s) * f[i][0];
-                    f[i][1] = n[1] * s * ftest[1] + (1.0 - s) * f[i][1];
-                    f[i][2] = n[2] * s * ftest[2] + (1.0 - s) * f[i][2];
-                } else {
-                    f[i][0] = s * ftest[0] + (1.0 - s) * f[i][0];
-                    f[i][1] = s * ftest[1] + (1.0 - s) * f[i][1];
-                    f[i][2] = s * ftest[2] + (1.0 - s) * f[i][2];
-                }
-                // FIXME : only applies the first wall this particle checks against.
-                break;
-            }
-        }
-#endif
-
-#if 0
-        // silo type BCS
-        // bottom wall
-        {
-            const double width = 0.2;
-            const double y_c = -10.0;
-            const double y = x[i][1];
-            double s = ((y - y_c) / width);
-            if (s > 1) {
-                s = 1;
-            } else if (s < 0) {
-                s = 0;
-            }
-            f[i][0] = (1.0 - s) * ftest[0] + s * f[i][0];
-            f[i][1] = (1.0 - s) * ftest[1] + s * f[i][1];
-            f[i][2] = (1.0 - s) * ftest[2] + s * f[i][2];
-
-            // if (y < y_c) {
-            //     v[i][0] *= s;
-            //     v[i][1] *= s;
-            //     v[i][2] *= s;
-            // }
-            // if (y < (y_c - width)) {
-            //     v[i][0] = 0;
-            //     v[i][1] = 0;
-            //     v[i][2] = 0;
-            // }
-        }
-        // left side
-        {
-            const double width = 0.1;
-            const double y_c = 0;
-            const double _x = x[i][0];
-            const double y = x[i][1];
-            double s = ((y - y_c) / width);
-            // double s = ((y_c - y) / width);
-            // if (((_x > 1) || (_x < -1)) && (y < y_c)) {
-            //     v[i][0] *= s;
-            //     v[i][1] *= s;
-            //     v[i][2] *= s;
-            // }
-            // if (((_x > 1) || (_x < -1)) && ((y < (y_c - width)) && (y > -1))) {
-            //     v[i][0] = 0;
-            //     v[i][1] = 0;
-            //     v[i][2] = 0;
-            // }
-            if (s > 1) {
-                s = 1;
-            } else if (s < 0) {
-                s = 0;
-            }
-
-            if ((-1 <= _x && _x <= 1) || y < (y_c - width)) {
-                // Free particle below the ledge
-                s = 1;
-            }
-/*
-            if (((_x > 1) || (_x < -1)) && (y < y_c)) {
-            } else {
-                s = 1.0;
-            }
-            if (((_x > 1) || (_x < -1)) && ((y < (y_c - width)) && (y > -1))) {
-                s = 0;
-            }
-*/
-            f[i][0] = (1.0 - s) * ftest[0] + s * f[i][0];
-            f[i][1] = (1.0 - s) * ftest[1] + s * f[i][1];
-            f[i][2] = (1.0 - s) * ftest[2] + s * f[i][2];
-        }
-#endif
     }
   }
 }
