@@ -62,11 +62,17 @@ typedef struct {
     double thickness;
 } stl_facet_t;
 
-static stl_facet_t loaded_facets[1024] = {0};
+static stl_facet_t loaded_facets[64] = {0};
 static size_t num_loaded_facets = 0;
 static double boundary_thickness = 0.01;
 static uint64_t sticky_bitmask = 0;
 
+static void cross(vector_3d_t * const result,
+                  const vector_3d_t * const a,
+                  const vector_3d_t * const b);
+static void vsub(vector_3d_t * const result,
+                 const vector_3d_t * const a,
+                 const vector_3d_t * const b);
 static void normalize(vector_3d_t *v);
 static void print_facet(const stl_facet_t * const facet);
 static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp);
@@ -190,13 +196,32 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
     num_loaded_facets = DIM(loaded_facets);
     parse_stl_file(loaded_facets, &num_loaded_facets, boundary_fp);
     for (size_t i = 0; i < num_loaded_facets; ++i) {
-        if ((i < 64) && (sticky_bitmask & (UINT64_C(1) << i) != 0)) {
-            loaded_facets[i].sticky = true;
-            loaded_facets[i].thickness = boundary_thickness;
-            normalize(&loaded_facets[i].normal);
+        stl_facet_t * const entry = &loaded_facets[i];
+        if (i < 64) {
+            entry->sticky = ((sticky_bitmask & (UINT64_C(1) << i)) != 0);
+            entry->thickness = boundary_thickness;
+
+            // If all three normal components are 0, assume that we're supposed
+            // to take the three vertices in increasing angle (counter
+            // clockwise) and compute the normal from those.
+            if (entry->normal.x == 0.0 &&
+                entry->normal.y == 0.0 &&
+                entry->normal.z == 0.0) {
+                // vectors from P to x.
+                vector_3d_t v_ab = {0};
+                vector_3d_t v_ac = {0};
+                vsub(&v_ab, &entry->b, &entry->a);
+                vsub(&v_ac, &entry->c, &entry->a);
+
+                // will actual normalize in next step.
+                vector_3d_t s = {0};
+                cross(&s, &v_ab, &v_ac);
+                entry->normal = s;
+            }
+            normalize(&entry->normal);
         }
         printf("facet %zu:\n", i);
-        print_facet(&loaded_facets[i]);
+        print_facet(entry);
     }
     fclose(boundary_fp);
   }
