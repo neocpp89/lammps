@@ -798,9 +798,9 @@ static void stl_facet_distance(double *distance, const vector_3d_t * const xp, c
     const double x3 = dot(&v, &facet->normal);
     if (0.0 <= x3 && x3 <= 5.0 * facet->thickness) {
         const vector_3d_t p = {
-            .x = xp->x - x3 * facet->normal.x,
-            .y = xp->y - x3 * facet->normal.y,
-            .z = xp->z - x3 * facet->normal.z,
+            .x = xp->x - (x3 * facet->normal.x),
+            .y = xp->y - (x3 * facet->normal.y),
+            .z = xp->z - (x3 * facet->normal.z),
         };
         if (is_projected_point_in_triangle_3d(&p, &facet->a, &facet->b, &facet->c)) {
             // const double x3 = dot(&v, &facet->normal);
@@ -831,24 +831,24 @@ static void b3_distance(double *distance, const vector_3d_t * const xp, const sd
     }
 }
 
-static void clear_wall_bitset(uint32_t *wall_bitset)
+static void clear_wall_bitset(uint64_t *wall_bitset)
 {
     *wall_bitset = 0;
 }
 
-static bool is_wall_close(uint32_t wall_bitset, size_t wall_index)
+static bool is_wall_close(uint64_t wall_bitset, size_t wall_index)
 {
-    return ((wall_bitset & (UINT32_C(1) << wall_index)) != 0);
+    return ((wall_bitset & (UINT64_C(1) << wall_index)) != 0);
 }
 
-static void set_wall_bitset(uint32_t *wall_bitset, size_t wall_index)
+static void set_wall_bitset(uint64_t *wall_bitset, size_t wall_index)
 {
-    *wall_bitset |= (UINT32_C(1) << wall_index);
+    *wall_bitset |= (UINT64_C(1) << wall_index);
 }
 
 static void boundary_force_direction_from_levelset(double *strength,
                                                    vector_3d_t *direction,
-                                                   uint32_t *walls_bitset,
+                                                   uint64_t *walls_bitset,
                                                    const vector_3d_t * const xp)
                                                    // ,
                                                    // const sd_boundary_3d_t * const boundaries,
@@ -862,7 +862,7 @@ static void boundary_force_direction_from_levelset(double *strength,
     // already part of the boundary!
     // static vector_3d_t normals[DIM(b3)] = {0};
 
-    uint32_t wb = 0;
+    uint64_t wb = 0;
     for (size_t bi = 0; bi < num_loaded_facets; ++bi) {
         const stl_facet_t * const entry = &loaded_facets[bi];
         stl_facet_distance(&distances[bi], xp, entry);
@@ -1048,7 +1048,7 @@ void FixRHEO::post_force(int /*vflag*/)
         };
 
         double s = 0.0;
-        uint32_t walls_bitset = 0;
+        uint64_t walls_bitset = 0;
         boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
 
         bool is_any_wall_sticky = false;

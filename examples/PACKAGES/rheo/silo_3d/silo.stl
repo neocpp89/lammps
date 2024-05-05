@@ -15,114 +15,114 @@ facet normal 0 1 0
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
+        vertex -3.003 -0.000 3.003
         vertex -3.003 3.003 -3.003
         vertex -3.003 3.003 3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
-        vertex -3.003 3.003 3.003
-        vertex -3.003 -1.001 3.003
+        vertex -3.003 -0.000 3.003
+        vertex -3.003 -0.000 -3.003
+        vertex -3.003 3.003 -3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex 3.003 -1.001 -3.003
+        vertex 3.003 -0.000 3.003
         vertex 3.003 3.003 3.003
         vertex 3.003 3.003 -3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex 3.003 -1.001 -3.003
-        vertex 3.003 -1.001 3.003
+        vertex 3.003 -0.000 3.003
+        vertex 3.003 3.003 -3.003
+        vertex 3.003 -0.000 -3.003
+    endloop
+endfacet
+facet normal 0 0 0
+    outer loop
+        vertex -3.003 -0.000 3.003
+        vertex -3.003 3.003 3.003
         vertex 3.003 3.003 3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
+        vertex -3.003 -0.000 3.003
+        vertex 3.003 3.003 3.003
+        vertex 3.003 -0.000 3.003
+    endloop
+endfacet
+facet normal 0 0 0
+    outer loop
+        vertex -3.003 -0.000 -3.003
         vertex 3.003 3.003 -3.003
         vertex -3.003 3.003 -3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
-        vertex 3.003 -1.001 -3.003
+        vertex -3.003 -0.000 -3.003
+        vertex 3.003 -0.000 -3.003
         vertex 3.003 3.003 -3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 3.003
-        vertex -3.003 3.003 3.003
-        vertex 3.003 3.003 3.003
-    endloop
-endfacet
-facet normal 0 0 0
-    outer loop
-        vertex -3.003 -1.001 3.003
-        vertex 3.003 3.003 3.003
-        vertex 3.003 -1.001 3.003
-    endloop
-endfacet
-facet normal 0 0 0
-    outer loop
-        vertex -3.003 -1.001 -3.003
-        vertex -1.001 -2.002 1.001
-        vertex -3.003 -1.001 3.003
-    endloop
-endfacet
-facet normal 0 0 0
-    outer loop
-        vertex -3.003 -1.001 -3.003
+        vertex -3.003 -0.000 3.003
         vertex -1.001 -2.002 -1.001
-        vertex -1.001 -2.002 1.001
+        vertex -3.003 -0.000 -3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
-        vertex 1.001 -2.002 -1.001
+        vertex -3.003 -0.000 3.003
+        vertex -1.001 -2.002 1.001
         vertex -1.001 -2.002 -1.001
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -3.003 -1.001 -3.003
-        vertex 3.003 -1.001 -3.003
-        vertex 1.001 -2.002 -1.001
+        vertex -3.003 -0.000 3.003
+        vertex 1.001 -2.002 1.001
+        vertex -1.001 -2.002 1.001
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex 3.003 -1.001 -3.003
-        vertex 3.003 -1.001 3.003
-        vertex 1.001 -2.002 -1.001
-    endloop
-endfacet
-facet normal 0 0 0
-    outer loop
-        vertex 1.001 -2.002 -1.001
-        vertex 3.003 -1.001 3.003
+        vertex -3.003 -0.000 3.003
+        vertex 3.003 -0.000 3.003
         vertex 1.001 -2.002 1.001
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -1.001 -2.002 1.001
+        vertex 3.003 -0.000 3.003
+        vertex 3.003 -0.000 -3.003
         vertex 1.001 -2.002 1.001
-        vertex 3.003 -1.001 3.003
     endloop
 endfacet
 facet normal 0 0 0
     outer loop
-        vertex -1.001 -2.002 1.001
-        vertex 3.003 -1.001 3.003
-        vertex -3.003 -1.001 3.003
+        vertex 1.001 -2.002 1.001
+        vertex 3.003 -0.000 -3.003
+        vertex 1.001 -2.002 -1.001
+    endloop
+endfacet
+facet normal 0 0 0
+    outer loop
+        vertex -1.001 -2.002 -1.001
+        vertex 1.001 -2.002 -1.001
+        vertex 3.003 -0.000 -3.003
+    endloop
+endfacet
+facet normal 0 0 0
+    outer loop
+        vertex -1.001 -2.002 -1.001
+        vertex 3.003 -0.000 -3.003
+        vertex -3.003 -0.000 -3.003
     endloop
 endfacet
 endsolid sachithsilo
