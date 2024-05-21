@@ -37,6 +37,7 @@
 
 #include <cfloat>
 #include <cassert>
+#include <cstdlib>
 
 using namespace LAMMPS_NS;
 using namespace RHEO_NS;
@@ -62,10 +63,38 @@ typedef struct {
     double thickness;
 } stl_facet_t;
 
-static stl_facet_t loaded_facets[64] = {0};
+typedef struct {
+    double *sdf_values;
+    bool *sticky_bits;
+
+    size_t ispan;
+    size_t jspan;
+    size_t kspan;
+    double dx;
+    double dy;
+    double dz;
+
+    // Not sure if extreme is really needed but could avoid a few divides at
+    // the cost of loading 3 doubles.
+    vector_3d_t origin;
+    vector_3d_t extreme;
+
+    // This is the triangle list at nodes (0, dx, 2*dx, ...)
+    uint64_t **triangle_lists;
+
+    // This is the triangle list across cells, spanning (0, dx), then (dx,
+    // 2*dx) etc. Note that there are only ispan-1, jspan-1, and kspan-1
+    // entries in each direction, so the indexing changes.
+    // TODO: Need to make sure that we compute this correctly when we optimize
+    // later, e.g. we don't miss if a sliver of a triangle is in a cell.
+    uint64_t **cell_centered_triangle_lists;
+} stl_voxel_grid_t;
+
+static stl_facet_t *loaded_facets = NULL;
 static size_t num_loaded_facets = 0;
 static double boundary_thickness = 0.01;
 static uint64_t sticky_bitmask = 0;
+static stl_voxel_grid_t voxel_grid = {0};
 
 static void cross(vector_3d_t * const result,
                   const vector_3d_t * const a,
@@ -76,6 +105,9 @@ static void vsub(vector_3d_t * const result,
 static void normalize(vector_3d_t *v);
 static void print_facet(const stl_facet_t * const facet);
 static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp);
+
+static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet);
+static void make_stl_voxel_grid(stl_voxel_grid_t *vgrid, const stl_facet_t * const facets, size_t num_facets, double spacing);
 
 /* ---------------------------------------------------------------------- */
 
@@ -97,6 +129,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
 
   int i;
   int n = atom->ntypes;
+  size_t max_stl_facets = 4096;
   FILE *boundary_fp = NULL;
   memory->create(rho0, n + 1, "rheo:rho0");
   memory->create(csq, n + 1, "rheo:csq");
@@ -174,6 +207,11 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal ramp thickness option in fix rheo");
       boundary_thickness  = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/stlmaxfacets") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal number of max stl facets.");
+      // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      max_stl_facets = strtoull(arg[iarg + 1], NULL, 0);
+      iarg += 1;
     } else if (strcmp(arg[iarg], "boundary/stickybitmask") == 0) {
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal sticky bc option in fix rheo");
       // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
@@ -193,7 +231,12 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   }
 
   if (boundary_fp != NULL) {
-    num_loaded_facets = DIM(loaded_facets);
+    // num_loaded_facets = DIM(loaded_facets);
+    num_loaded_facets = max_stl_facets;
+    loaded_facets = static_cast<stl_facet_t *>(calloc(max_stl_facets, sizeof(loaded_facets[0])));
+    if (loaded_facets == NULL) {
+        error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
+    }
     parse_stl_file(loaded_facets, &num_loaded_facets, boundary_fp);
     for (size_t i = 0; i < num_loaded_facets; ++i) {
         stl_facet_t * const entry = &loaded_facets[i];
@@ -224,6 +267,9 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         print_facet(entry);
     }
     fclose(boundary_fp);
+
+    make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, 3.0 * h);
+    // make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, 5.0 * boundary_thickness);
   }
 }
 
@@ -738,6 +784,547 @@ static void print_facet(const stl_facet_t * const facet)
     printf("  thickness = %g\n", facet->thickness);
 }
 
+static void update_triangle_list(uint64_t **list, uint64_t index_to_add)
+{
+    if (*list == NULL) {
+        *list = static_cast<uint64_t *>(calloc(2, sizeof(*list[0])));
+        assert(*list != NULL);
+        // first element is number of entries that follow.
+        (*list)[0] = 1;
+        (*list)[1] = index_to_add;
+    } else {
+        assert(*list != NULL);
+        const size_t capacity = (*list)[0];
+
+        uint64_t *new_list = static_cast<uint64_t *>(calloc(capacity + 2, sizeof(*list[0])));
+        assert(new_list != NULL);
+
+        new_list[0] = capacity + 1;
+        for (size_t i = 0; i < capacity; ++i) {
+            new_list[i + 1] = (*list)[i + 1];
+        }
+        new_list[capacity + 1] = index_to_add;
+        free(*list);
+        *list = new_list;
+    }
+}
+
+static size_t sdf_index_from_spans(const stl_voxel_grid_t *vgrid, size_t i, size_t j, size_t k)
+{
+    return (i * vgrid->jspan * vgrid->kspan) + (j * vgrid->kspan) + k;
+}
+
+static size_t sdf_cell_index_from_spans(const stl_voxel_grid_t *vgrid, size_t i, size_t j, size_t k)
+{
+    return (i * (vgrid->jspan - 1) * (vgrid->kspan - 1)) + (j * (vgrid->kspan - 1)) + k;
+}
+
+static void get_stl_facet_bounds(vector_3d_t *vmin, vector_3d_t *vmax, const stl_facet_t * const facet)
+{
+    *vmin = (vector_3d_t){0};
+    *vmax = (vector_3d_t){0};
+
+    vmax->x = std::max(std::max(std::max(facet->a.x, facet->b.x), facet->c.x), vmax->x);
+    vmax->y = std::max(std::max(std::max(facet->a.y, facet->b.y), facet->c.y), vmax->y);
+    vmax->z = std::max(std::max(std::max(facet->a.z, facet->b.z), facet->c.z), vmax->z);
+    vmin->x = std::min(std::min(std::min(facet->a.x, facet->b.x), facet->c.x), vmin->x);
+    vmin->y = std::min(std::min(std::min(facet->a.y, facet->b.y), facet->c.y), vmin->y);
+    vmin->z = std::min(std::min(std::min(facet->a.z, facet->b.z), facet->c.z), vmin->z);
+}
+
+static void make_stl_voxel_grid(stl_voxel_grid_t *vgrid, const stl_facet_t * const facets, size_t num_facets, double spacing)
+{
+    vector_3d_t vmax = {0};
+    vector_3d_t vmin = {0};
+    // TODO: Fix slack for facet thickness
+    const double border = 6.0 * spacing;
+    for (size_t i = 0; i < num_facets; ++i) {
+        const stl_facet_t * const entry = &facets[i];
+        vmax.x = std::max(std::max(std::max(entry->a.x, entry->b.x), entry->c.x), vmax.x);
+        vmax.y = std::max(std::max(std::max(entry->a.y, entry->b.y), entry->c.y), vmax.y);
+        vmax.z = std::max(std::max(std::max(entry->a.z, entry->b.z), entry->c.z), vmax.z);
+        vmin.x = std::min(std::min(std::min(entry->a.x, entry->b.x), entry->c.x), vmin.x);
+        vmin.y = std::min(std::min(std::min(entry->a.y, entry->b.y), entry->c.y), vmin.y);
+        vmin.z = std::min(std::min(std::min(entry->a.z, entry->b.z), entry->c.z), vmin.z);
+    }
+
+    print_vector(&vmin);
+    print_vector(&vmax);
+
+    vgrid->dx = spacing;
+    vgrid->dy = spacing;
+    vgrid->dz = spacing;
+
+    vgrid->origin = (vector_3d_t) {
+        vmin.x - border,
+        vmin.y - border,
+        vmin.z - border,
+    };
+
+    // May be a bit wasteful, can use fmod if we care enough.
+    vgrid->ispan = 1 + ((vmax.x - vmin.x + 2 * border) / vgrid->dx);
+    vgrid->jspan = 1 + ((vmax.y - vmin.y + 2 * border) / vgrid->dy);
+    vgrid->kspan = 1 + ((vmax.z - vmin.z + 2 * border) / vgrid->dz);
+
+    vgrid->extreme = (vector_3d_t) {
+        vgrid->origin.x + (vgrid->dx * vgrid->ispan),
+        vgrid->origin.y + (vgrid->dy * vgrid->jspan),
+        vgrid->origin.z + (vgrid->dz * vgrid->kspan),
+    };
+
+    const size_t num_sdf_values = vgrid->ispan * vgrid->jspan * vgrid->kspan;
+    const size_t num_bytes = num_sdf_values * sizeof(vgrid->sdf_values[0]);
+
+    printf("Allocating %zu bytes for STL voxel grid (%zu grid points).\n", num_bytes, num_sdf_values);
+    vgrid->sdf_values = static_cast<double *>(calloc(num_sdf_values, sizeof(vgrid->sdf_values[0])));
+    vgrid->sticky_bits = static_cast<bool *>(calloc(num_sdf_values, sizeof(vgrid->sticky_bits[0])));
+    vgrid->triangle_lists = static_cast<uint64_t **>(calloc(num_sdf_values, sizeof(vgrid->triangle_lists[0])));
+    vgrid->cell_centered_triangle_lists = static_cast<uint64_t **>(calloc(num_sdf_values, sizeof(vgrid->cell_centered_triangle_lists[0])));
+
+    if (vgrid->sdf_values == NULL) {
+        fprintf(stderr, "Unable to allocate memory for STL voxel grid, wanted %zu bytes.\n", num_bytes);
+    }
+
+    if (vgrid->sticky_bits == NULL) {
+        fprintf(stderr, "Unable to allocate memory for STL voxel grid sticky bits, wanted %zu bytes.\n", num_sdf_values * sizeof(vgrid->sticky_bits[0]));
+    }
+
+    for (size_t i = 0; i < num_sdf_values; ++i) {
+        vgrid->sdf_values[i] = DBL_MAX;
+    }
+
+    for (size_t i = 0; i < vgrid->ispan; ++i) {
+        const double xpx = vgrid->origin.x + (i * vgrid->dx);
+        for (size_t j = 0; j < vgrid->jspan; ++j) {
+            const double xpy = vgrid->origin.y + (j * vgrid->dy);
+            for (size_t k = 0; k < vgrid->kspan; ++k) {
+                const double xpz = vgrid->origin.z + (k * vgrid->dz);
+                const vector_3d_t xp = {
+                    .x = xpx,
+                    .y = xpy,
+                    .z = xpz,
+                };
+                const size_t sdf_index = sdf_index_from_spans(vgrid, i, j, k);
+
+                // TODO: Can make this more efficient by swapping iteration
+                // order with the grid, letting each triangle only apply to the
+                // few points around it.
+                for (size_t m = 0; m < num_facets; ++m) {
+                    const stl_facet_t * const entry = &facets[m];
+                    vector_3d_t vfmin = {0};
+                    vector_3d_t vfmax = {0};
+                    get_stl_facet_bounds(&vfmin, &vfmax, entry);
+                    // TODO: A more expensive check here will reduce the amount of work later.
+                    if (((vfmin.x - vgrid->dx) < xpx) && (xpx <= (vfmax.x + vgrid->dx)) &&
+                        ((vfmin.y - vgrid->dy) < xpy) && (xpy <= (vfmax.y + vgrid->dy)) &&
+                        ((vfmin.z - vgrid->dz) < xpz) && (xpz <= (vfmax.z + vgrid->dz))) {
+                        update_triangle_list(&vgrid->triangle_lists[sdf_index], m);
+                    }
+                }
+
+/*
+                for (size_t m = 0; m < num_facets; ++m) {
+                    const stl_facet_t * const entry = &facets[m];
+                    const double facet_border = 5.0 * entry->thickness;
+                    double s = 0;
+                    stl_facet_distance(&s, &xp, entry);
+                    if (s <= 0.0 && s <= facet_border) {
+                        // *strength = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
+                        vgrid->sdf_values[sdf_index] = std::min(vgrid->sdf_values[sdf_index], s / entry->thickness);
+                        if (s <= 1.0) {
+                            vgrid->sticky_bits[sdf_index] |= entry->sticky;
+                        }
+                    }
+                }
+*/
+            }
+        }
+        printf("%06zu / %06zu planes computed.\n", i, vgrid->ispan);
+    }
+
+    for (size_t i = 0; i < (vgrid->ispan - 1); ++i) {
+        for (size_t j = 0; j < (vgrid->jspan - 1); ++j) {
+            for (size_t k = 0; k < (vgrid->kspan - 1); ++k) {
+                const uint64_t * const triangle_lists[] = {
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i, j, k)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i, j, k+1)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i, j+1, k)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i+1, j, k)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i, j+1, k+1)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i+1, j+1, k)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i+1, j, k+1)],
+                    vgrid->triangle_lists[sdf_index_from_spans(vgrid, i+1, j+1, k+1)],
+                };
+                uint64_t tl_index[DIM(triangle_lists)] = {0};
+                const uint64_t tl_capacity[] = {
+                    (triangle_lists[0] == NULL) ? 0 : triangle_lists[0][0],
+                    (triangle_lists[1] == NULL) ? 0 : triangle_lists[1][0],
+                    (triangle_lists[2] == NULL) ? 0 : triangle_lists[2][0],
+                    (triangle_lists[3] == NULL) ? 0 : triangle_lists[3][0],
+                    (triangle_lists[4] == NULL) ? 0 : triangle_lists[4][0],
+                    (triangle_lists[5] == NULL) ? 0 : triangle_lists[5][0],
+                    (triangle_lists[6] == NULL) ? 0 : triangle_lists[6][0],
+                    (triangle_lists[7] == NULL) ? 0 : triangle_lists[7][0],
+                };
+
+                const size_t sdf_cell_index = sdf_cell_index_from_spans(vgrid, i, j, k);
+
+                while (
+                    (tl_index[0] < tl_capacity[0]) ||
+                    (tl_index[1] < tl_capacity[1]) ||
+                    (tl_index[2] < tl_capacity[2]) ||
+                    (tl_index[3] < tl_capacity[3]) ||
+                    (tl_index[4] < tl_capacity[4]) ||
+                    (tl_index[5] < tl_capacity[5]) ||
+                    (tl_index[6] < tl_capacity[6]) ||
+                    (tl_index[7] < tl_capacity[7])
+                ) {
+
+                    uint64_t minidx = UINT64_MAX;
+                    for (size_t m = 0; m < DIM(triangle_lists); ++m) {
+                        if (tl_index[m] < tl_capacity[m]) {
+                            const uint64_t candidate = triangle_lists[m][tl_index[m] + 1];
+                            if (candidate < minidx) {
+                                minidx = candidate;
+                            }
+                        }
+                    }
+
+                    assert(minidx != UINT64_MAX);
+                    update_triangle_list(&vgrid->cell_centered_triangle_lists[sdf_cell_index], minidx);
+
+                    for (size_t m = 0; m < DIM(triangle_lists); ++m) {
+                        if (tl_index[m] < tl_capacity[m]) {
+                            const uint64_t candidate = triangle_lists[m][tl_index[m] + 1];
+                            if (candidate == minidx) {
+                                tl_index[m]++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        printf("%06zu / %06zu cell planes computed.\n", i, vgrid->ispan - 1);
+    }
+
+    {
+        char filename[256] = {0};
+        const char dir[] = "/Crucial2TB/sdunatunga";
+        snprintf(filename, sizeof(filename), "%s/lmp_%p.csv", dir, vgrid->sdf_values);
+        FILE *g = fopen(filename, "w");
+        fprintf(g, "x,y,z,s,n\n");
+        for (size_t i = 0; i < vgrid->ispan; ++i) {
+            const double xpx = vgrid->origin.x + (i * vgrid->dx);
+            for (size_t j = 0; j < vgrid->jspan; ++j) {
+                const double xpy = vgrid->origin.y + (j * vgrid->dy);
+                for (size_t k = 0; k < vgrid->kspan; ++k) {
+                    const double xpz = vgrid->origin.z + (k * vgrid->dz);
+                    const vector_3d_t xp = {
+                        .x = xpx,
+                        .y = xpy,
+                        .z = xpz,
+                    };
+                    const size_t sdf_index = sdf_index_from_spans(vgrid, i, j, k);
+                    const size_t n = (vgrid->triangle_lists[sdf_index] == NULL) ? 0 : vgrid->triangle_lists[sdf_index][0];
+                    fprintf(g, "%.17g,%.17g,%.17g,%.17g,%zu\n", xpx, xpy, xpz, vgrid->sdf_values[sdf_index], n);
+                }
+            }
+            printf("%06zu / %06zu planes written to disk at %s.\n", i, vgrid->ispan, filename);
+        }
+        fclose(g);
+    }
+
+    {
+        char filename[256] = {0};
+        const char dir[] = "/Crucial2TB/sdunatunga";
+        snprintf(filename, sizeof(filename), "%s/lmpcell_%p.csv", dir, vgrid->cell_centered_triangle_lists);
+        FILE *g = fopen(filename, "w");
+        fprintf(g, "x,y,z,s,n\n");
+        for (size_t i = 0; i < vgrid->ispan - 1; ++i) {
+            const double xpx = vgrid->origin.x + (i * vgrid->dx);
+            for (size_t j = 0; j < vgrid->jspan - 1; ++j) {
+                const double xpy = vgrid->origin.y + (j * vgrid->dy);
+                for (size_t k = 0; k < vgrid->kspan - 1; ++k) {
+                    const double xpz = vgrid->origin.z + (k * vgrid->dz);
+                    const vector_3d_t xp = {
+                        .x = xpx + vgrid->dx / 2.0,
+                        .y = xpy + vgrid->dy / 2.0,
+                        .z = xpz + vgrid->dz / 2.0,
+                    };
+                    const size_t sdf_cell_index = sdf_cell_index_from_spans(vgrid, i, j, k);
+                    const size_t n = (vgrid->cell_centered_triangle_lists[sdf_cell_index] == NULL) ? 0 : vgrid->cell_centered_triangle_lists[sdf_cell_index][0];
+                    if (n > 0) {
+                        fprintf(g, "%.17g,%.17g,%.17g,%zu\n", xp.x, xp.y, xp.z, n);
+                        fprintf(g, "#");
+                        for (size_t m = 0; m < n; ++m) {
+                            fprintf(g, " %zu", vgrid->cell_centered_triangle_lists[sdf_cell_index][m + 1]);
+                        }
+                        fprintf(g, "\n");
+                    }
+                }
+            }
+            printf("%06zu / %06zu cell planes written to disk at %s.\n", i, vgrid->ispan - 1, filename);
+        }
+        fclose(g);
+    }
+
+    print_vector(&(vgrid->origin));
+    print_vector(&(vgrid->extreme));
+
+    // vgrid->extreme = (vector_3d_t) {
+    //     vmax.x + border,
+    //     vmax.y + border,
+    //     vmax.z + border,
+    // };
+}
+
+static void sdf_and_normal_from_vgrid_old(double *sdf, vector_3d_t *normal, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
+{
+    if (
+        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
+        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
+        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
+    ) {
+        return;
+    }
+
+    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
+    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
+    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
+    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
+    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
+    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
+    const double wi = 1.0 - wip;
+    const double wj = 1.0 - wjp;
+    const double wk = 1.0 - wkp;
+
+    double s[] = {
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j, k)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j, k+1)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j+1, k)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j, k)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j+1, k+1)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j+1, k)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j, k+1)],
+        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j+1, k+1)],
+    };
+
+    // Make s = 1 the boundary.
+    bool allzero = true;
+    for (size_t i = 0; i < DIM(s); ++i) {
+        s[i] = clamp_unity(1.0 - s[i]);
+        if (s[i] != 0.0) {
+            allzero = false;
+        }
+    }
+
+    if (allzero) {
+        *sdf = 0.0;
+        return;
+    }
+
+    const bool b[] = {
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j, k)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j, k+1)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j+1, k)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j, k)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j+1, k+1)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j+1, k)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j, k+1)],
+        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j+1, k+1)],
+    };
+
+    *sticky = false;
+    for (size_t i = 0; i < DIM(b); ++i) {
+        *sticky |= b[i];
+    }
+
+    const double sp = (
+        wi * wj * wk * s[0] +
+        wi * wj * wkp * s[1] +
+        wi * wjp * wk * s[2] +
+        wip * wj * wk * s[3] +
+        wi * wjp * wkp * s[4] +
+        wip * wjp * wk * s[5] +
+        wip * wj * wkp * s[6] +
+        wip * wjp * wkp * s[7]
+    );
+
+    *sdf = sp;
+
+    const double dspdx = (
+        -wj * wk * s[0] +
+        -wj * wkp * s[1] +
+        -wjp * wk * s[2] +
+        wj * wk * s[3] +
+        -wjp * wkp * s[4] +
+        wjp * wk * s[5] +
+        wj * wkp * s[6] +
+        wjp * wkp * s[7]
+    );
+
+    const double dspdy = (
+        -wi * wk * s[0] +
+        -wi * wkp * s[1] +
+        wi * wk * s[2] +
+        -wip * wk * s[3] +
+        wi * wkp * s[4] +
+        wip * wk * s[5] +
+        -wip * wkp * s[6] +
+        wip * wkp * s[7]
+    );
+
+    const double dspdz = (
+        -wi * wj * s[0] +
+        wi * wj * s[1] +
+        -wi * wjp * s[2] +
+        -wip * wj * s[3] +
+        wi * wjp * s[4] +
+        -wip * wjp * s[5] +
+        wip * wj * s[6] +
+        wip * wjp * s[7]
+    );
+
+    // we flipped the sign of s, so we need to flip this as well to get the
+    // right normal.
+    normal->x = -dspdx;
+    normal->y = -dspdy;
+    normal->z = -dspdz;
+
+    normalize(normal);
+}
+
+static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
+{
+    if (
+        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
+        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
+        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
+    ) {
+        return;
+    }
+
+    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
+    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
+    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
+    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
+    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
+    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
+    const double wi = 1.0 - wip;
+    const double wj = 1.0 - wjp;
+    const double wk = 1.0 - wkp;
+
+    const uint64_t * const triangle_list =
+        vgrid->cell_centered_triangle_lists[sdf_cell_index_from_spans(vgrid, i, j, k)];
+
+    if (triangle_list == NULL) {
+        *sdf = 0.0;
+        return;
+    }
+
+    const size_t num_triangles_in_cell_list = static_cast<size_t>(triangle_list[0]);
+
+    static double *distances = NULL;
+    static size_t capacity_distances = 0;
+    if (distances == NULL) {
+        capacity_distances = num_triangles_in_cell_list;
+        distances = static_cast<double *>(calloc(capacity_distances, sizeof(distances[0])));
+    }
+
+    if (capacity_distances < num_triangles_in_cell_list) {
+        free(distances);
+        capacity_distances = num_triangles_in_cell_list;
+        distances = static_cast<double *>(calloc(capacity_distances, sizeof(distances[0])));
+    }
+
+    // Now this just looks like the old style of problem but checking against a
+    // smaller number of triangles.
+    {
+        // Take the function f = prod(d_1, d_2, ...) (d_i distance from boundary i).
+        // The gradient gives us a nice direction, which can be written as
+        // sum_over_i(n_i * prod_for_j_not_equal_i(d_j)) where n_i is the normal to
+        // the boundary segment.
+
+        bool any_wall_detected = false;
+        for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
+            const size_t bi = triangle_list[i + 1];
+            const stl_facet_t * const entry = &loaded_facets[bi];
+            stl_facet_distance(&distances[i], xp, entry);
+
+            // Wrong side of the BC, set back to a far away value.
+            if (distances[i] < 0.0) {
+                distances[i] = DBL_MAX;
+            }
+
+            if (distances[i] < entry->thickness) {
+                any_wall_detected = true;
+            }
+        }
+
+        // At least one wall detected.
+        if (any_wall_detected) {
+            double min_d = distances[0];
+            size_t min_wall_index = 0;
+            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
+                const size_t bi = triangle_list[i + 1];
+                const stl_facet_t * const entry = &loaded_facets[bi];
+                if ((distances[i] < entry->thickness) && (distances[i] < min_d)) {
+                    min_d = distances[i];
+                    min_wall_index = bi;
+                }
+            }
+            // Do we want min distance, or max strength BC?
+            // *strength = clamp_unity(1.0 - (min_d / loaded_facets[min_wall_index].thickness));
+            // Clip the last closest tenth so there's a bit of dead zone where the
+            // BC is at full strength.
+            *sdf = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
+        } else {
+            *sdf = 0.0;
+        }
+
+        if (*sdf != 0.0) {
+            *normal = (vector_3d_t) {
+                0.0,
+                0.0,
+                0.0
+            };
+            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
+                double pi_d = 1.0;
+                for (size_t j = 0; j < num_triangles_in_cell_list; ++j) {
+                    const size_t bj = triangle_list[j + 1];
+                    const stl_facet_t * const entry = &loaded_facets[bj];
+                    // Not the current wall we're considering (chain rule), and
+                    // product of all other walls that are within range.
+                    if ((j != i) && (distances[j] < entry->thickness)) {
+                        // distances should all be positive by this point, so fabs is
+                        // unnecessary...
+                        // pi_d *= fabs(distances[j]);
+                        pi_d *= distances[j];
+                    }
+                }
+
+                normal->x += pi_d * loaded_facets[i].normal.x;
+                normal->y += pi_d * loaded_facets[i].normal.y;
+                normal->z += pi_d * loaded_facets[i].normal.z;
+            }
+
+            normalize(normal);
+
+
+            bool is_any_wall_sticky = false;
+            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
+                const size_t bi = triangle_list[i + 1];
+                const stl_facet_t * const entry = &loaded_facets[bi];
+                // Check if we are in contact with a sticky wall.
+                if (distances[j] < entry->thickness) {
+                    is_any_wall_sticky |= entry->sticky;
+                }
+            }
+            *sticky = is_any_wall_sticky;
+        }
+    }
+}
+
 static void bc_setup(void)
 {
 /*
@@ -846,6 +1433,7 @@ static void set_wall_bitset(uint64_t *wall_bitset, size_t wall_index)
     *wall_bitset |= (UINT64_C(1) << wall_index);
 }
 
+#if 0
 static void boundary_force_direction_from_levelset(double *strength,
                                                    vector_3d_t *direction,
                                                    uint64_t *walls_bitset,
@@ -925,6 +1513,7 @@ static void boundary_force_direction_from_levelset(double *strength,
         normalize(direction);
     }
 }
+#endif
 
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
 {
@@ -1048,17 +1637,19 @@ void FixRHEO::post_force(int /*vflag*/)
         };
 
         double s = 0.0;
-        uint64_t walls_bitset = 0;
-        boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
-
         bool is_any_wall_sticky = false;
-        for (size_t i = 0; i < num_loaded_facets; ++i) {
-            const stl_facet_t * const entry = &loaded_facets[i];
-            // Check if we are in contact with a sticky wall.
-            if (is_wall_close(walls_bitset, i)) {
-                is_any_wall_sticky |= entry->sticky;
-            }
-        }
+        uint64_t walls_bitset = 0;
+        sdf_and_normal_from_vgrid(&s, &fdir, &is_any_wall_sticky, &voxel_grid, &xp);
+        // uint64_t walls_bitset = 0;
+        // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
+        // bool is_any_wall_sticky = false;
+        // for (size_t i = 0; i < num_loaded_facets; ++i) {
+        //     const stl_facet_t * const entry = &loaded_facets[i];
+        //     // Check if we are in contact with a sticky wall.
+        //     if (is_wall_close(walls_bitset, i)) {
+        //         is_any_wall_sticky |= entry->sticky;
+        //     }
+        // }
 
         stress[i][12] = s;
         stress[i][13] = xp.x;
