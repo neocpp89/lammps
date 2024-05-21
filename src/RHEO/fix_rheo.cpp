@@ -1290,6 +1290,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *st
             };
             for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
                 double pi_d = 1.0;
+                const size_t bi = triangle_list[i + 1];
                 for (size_t j = 0; j < num_triangles_in_cell_list; ++j) {
                     const size_t bj = triangle_list[j + 1];
                     const stl_facet_t * const entry = &loaded_facets[bj];
@@ -1303,9 +1304,9 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *st
                     }
                 }
 
-                normal->x += pi_d * loaded_facets[i].normal.x;
-                normal->y += pi_d * loaded_facets[i].normal.y;
-                normal->z += pi_d * loaded_facets[i].normal.z;
+                normal->x += pi_d * loaded_facets[bi].normal.x;
+                normal->y += pi_d * loaded_facets[bi].normal.y;
+                normal->z += pi_d * loaded_facets[bi].normal.z;
             }
 
             normalize(normal);
@@ -1316,7 +1317,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *st
                 const size_t bi = triangle_list[i + 1];
                 const stl_facet_t * const entry = &loaded_facets[bi];
                 // Check if we are in contact with a sticky wall.
-                if (distances[j] < entry->thickness) {
+                if (distances[i] < entry->thickness) {
                     is_any_wall_sticky |= entry->sticky;
                 }
             }
