@@ -69,6 +69,10 @@ class ComputeRHEOStress : public Compute {
   double LAMBDA;
 };
 
+enum {
+    NUM_STRESS_COMPONENTS = 32,
+};
+
 }    // namespace LAMMPS_NS
 
 #endif

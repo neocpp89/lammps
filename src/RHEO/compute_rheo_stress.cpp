@@ -38,10 +38,6 @@ using namespace RHEO_NS;
 #define DIM(x) (sizeof(x) / sizeof(x[0]))
 #endif
 
-enum {
-    NUM_STRESS_COMPONENTS = 32,
-};
-
 // #define SD_PRINTF(args...) printf(args);
 #define SD_PRINTF(args...)
 
@@ -625,10 +621,10 @@ void ComputeRHEOStress::compute_peratom()
   // grow local stress array if necessary
   // needs to be atom->nmax in length
 
-  if (atom->nmax > nmax_store) {
-    memory->destroy(stress);
-    grow_arrays(atom->nmax);
-  }
+  // if (atom->nmax > nmax_store) {
+  //   memory->destroy(stress);
+  //   grow_arrays(atom->nmax);
+  // }
 
   if (fix_rheo == nullptr) {
     error->all(FLERR, "fix rheo not set");
@@ -643,7 +639,9 @@ void ComputeRHEOStress::compute_peratom()
   const double *rho = atom->rho;
 
   // initialize arrays
-  if (atom->nmax > nmax_store) grow_arrays(atom->nmax);
+  if (atom->nmax > nmax_store) {
+    grow_arrays(atom->nmax);
+  }
 
   for (i = 0; i < nlocal; ++i) {
     double *T = stress[i];
@@ -745,7 +743,8 @@ void ComputeRHEOStress::unpack_reverse_comm(int n, int *list, double *buf)
   for (i = 0; i < n; i++) {
     j = list[i];
     for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
-      stress[j][k] += buf[m++];
+      stress[j][k] = buf[m++];
+      // stress[j][k] += buf[m++];
   }
 }
 

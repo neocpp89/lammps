@@ -27,6 +27,7 @@
 #include "modify.h"
 #include "update.h"
 
+#include <cassert>
 #include <cmath>
 #include <cstring>
 
@@ -61,7 +62,7 @@ FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
     { .required = true, .name = "I_0", .value = 0.278, .set_by_input_file = false, },
   };
 
-  comm_forward = 6;
+  comm_forward = NUM_STRESS_COMPONENTS;
 
   int iarg = 3;
   while (iarg < narg) {
@@ -108,7 +109,8 @@ void FixRHEOStress::post_constructor()
 {
   id_fix = utils::strdup(std::string(id) + "_store");
   // store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM d_pxx d_pyy d_pzz d_pxy d_pxz d_pyz", id_fix, group->names[igroup])));
-  store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM 6 0 1 1", id_fix, group->names[igroup])));
+  // Flags are Array type (X 0), 1 Restart, 1 Ghost
+  store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM {} 0 1 1", id_fix, group->names[igroup], std::to_string(NUM_STRESS_COMPONENTS))));
   array_atom = store_fix->astore;
 
   id_compute = utils::strdup(std::string(id) + "_compute");
@@ -143,9 +145,9 @@ void FixRHEOStress::pre_force(int vflag)
   double **saved_stress = store_fix->astore;
   double **stress = stress_compute->array_atom;
 
-  int ntotal = atom->nlocal+atom->nghost;
+  const int ntotal = atom->nlocal+atom->nghost;
   for (int i = 0; i < ntotal; i++)
-    for (int a = 0; a < 6; a++)
+    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++)
       saved_stress[i][a] = stress[i][a];
 
   stress_compute->addstep(update->ntimestep + 1);
@@ -171,7 +173,7 @@ int FixRHEOStress::pack_forward_comm(int n, int *list, double *buf,
   m = 0;
   for (i = 0; i < n; i++) {
     j = list[i];
-    for (a = 0; a < 6; a++)
+    for (a = 0; a < NUM_STRESS_COMPONENTS; a++)
       buf[m++] = saved_stress[j][a];
   }
   return m;
@@ -187,6 +189,6 @@ void FixRHEOStress::unpack_forward_comm(int n, int first, double *buf)
   m = 0;
   last = first + n;
   for (i = first; i < last; i++)
-    for (a = 0; a < 6; a++)
+    for (a = 0; a < NUM_STRESS_COMPONENTS; a++)
       saved_stress[i][a] = buf[m++];
 }

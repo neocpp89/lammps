@@ -1572,6 +1572,17 @@ static void boundary_strength(double *strength, bool *in_dead_zone, double x, do
     }
 }
 
+static double sgn(double x)
+{
+    if (x > 0.0) {
+        return 1.0;
+    } else if (x == 0.0) {
+        return 0.0;
+    } else {
+        return -1.0;
+    }
+}
+
 void FixRHEO::post_force(int /*vflag*/)
 {
   // update v, x and rho of atoms in group
@@ -1671,6 +1682,9 @@ void FixRHEO::post_force(int /*vflag*/)
             // We can slide along all walls in this contact, so we need a
             // direction.
             if (!is_any_wall_sticky) {
+#if 0
+                const double mu_wall = 0.0;
+
                 const vector_3d_t normal = fdir;
 
                 const vector_3d_t vf = {
@@ -1685,26 +1699,157 @@ void FixRHEO::post_force(int /*vflag*/)
                     .z = ftest[2],
                 };
 
+                // Force before any wall modifications
                 const double fn_mag = dot(&vf, &normal);
-
                 const double fn[] = {
                     normal.x * fn_mag,
                     normal.y * fn_mag,
                     normal.z * fn_mag,
                 };
+                const vector_3d_t ftt = {
+                    .x = vf.x - fn[0],
+                    .y = vf.y - fn[1],
+                    .z = vf.z - fn[2],
+                };
+                const double ftt_mag2 = magnitude_squared(&ftt);
+                double ftt_mag = 0.0;
+                vector_3d_t ftt_direction = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                };
+                if (ftt_mag2 > 0.0) {
+                    ftt_mag = sqrt(ftt_mag2);
+                    ftt_direction = ftt;
+                    normalize(&ftt_direction);
+                }
 
-                const double fw_mag = dot(&vft, &normal);
-
+                // Force after impact with the wall
+                const double fw_mag = std::max(0.0, dot(&vft, &normal));
                 const double fw[] = {
                     normal.x * fw_mag,
                     normal.y * fw_mag,
                     normal.z * fw_mag,
                 };
+                const vector_3d_t fwt = {
+                    .x = vft.x - fw[0],
+                    .y = vft.y - fw[1],
+                    .z = vft.z - fw[2],
+                };
+                const double fwt_mag2 = magnitude_squared(&fwt);
+                double fwt_mag = 0.0;
+                vector_3d_t fwt_direction = {
+                    .x = 0,
+                    .y = 0,
+                    .z = 0,
+                };
+                if (fwt_mag2 > 0.0) {
+                    fwt_mag = sqrt(fwt_mag2);
+                    fwt_direction = fwt;
+                    normalize(&fwt_direction);
+                }
+
+                const vector_3d_t f_ct_n = {
+                    .x = fw[0] - fn[0],
+                    .y = fw[1] - fn[1],
+                    .z = fw[2] - fn[2],
+                };
+
+                const double fwt_max_mag = mu_wall * sqrt(magnitude_squared(&f_ct_n));
+
+                // Take smaller of the applied tangential forces (either
+                // bounded by friction coefficient or by test force required
+                // from velocity) and put it in the correct direction.
+                const double fwt_mag_end_of_step = std::min(fwt_mag, fwt_max_mag);
+
+                // fw is the normal part, fwt term is tangential. This deltaf
+                // can be considered the force applied by the contact. Note
+                // that we are force the normal term to a specific value (to
+                // ensure no penetration through the boundary), but the
+                // tangential term is added onto the existing forces.
+                const double deltaf[] = {
+                    s * (f_ct_n.x + (fwt_mag_end_of_step * fwt_direction.x - ftt.x)),
+                    s * (f_ct_n.y + (fwt_mag_end_of_step * fwt_direction.y - ftt.y)),
+                    s * (f_ct_n.z + (fwt_mag_end_of_step * fwt_direction.z - ftt.z)),
+                };
+
+                f[i][0] = deltaf[0] + f[i][0];
+                f[i][1] = deltaf[1] + f[i][1];
+                f[i][2] = deltaf[2] + f[i][2];
+
+                stress[i][6] = deltaf[0];
+                stress[i][7] = deltaf[1];
+                stress[i][8] = deltaf[2];
+#endif
+                const double mu_wall = 0.3;
+
+                const vector_3d_t normal = fdir;
+
+                const vector_3d_t ft = {
+                    .x = f[i][0],
+                    .y = f[i][1],
+                    .z = f[i][2],
+                };
+
+                const vector_3d_t vt = {
+                    .x = v[i][0],
+                    .y = v[i][1],
+                    .z = v[i][2],
+                };
+
+                const vector_3d_t vtr = {
+                    .x = vt.x + dtfm * ft.x,
+                    .y = vt.y + dtfm * ft.y,
+                    .z = vt.z + dtfm * ft.z,
+                };
+
+                const double vtrn = dot(&vtr, &normal);
+
+                vector_3d_t f_c = {
+                    .x = 0.0,
+                    .y = 0.0,
+                    .z = 0.0,
+                };
+
+    // test for if force in pull-off yields ok result
+#if 0
+                if (vtrn > 0.0) {
+                    // moving away from boundary, no contact forces.
+                } else {
+#else
+                {
+#endif
+                    const double f_cn = -vtrn / dtfm;
+
+                    const vector_3d_t vtrtv = {
+                        .x = vtr.x - vtrn * normal.x,
+                        .y = vtr.y - vtrn * normal.y,
+                        .z = vtr.z - vtrn * normal.z,
+                    };
+
+                    const double vtrt = sqrt(magnitude_squared(&vtrtv));
+
+                    const double f_ct_max_wall = mu_wall * f_cn;
+                    const double f_ct_stick = vtrt / dtfm;
+                    const double f_ct = std::min(f_ct_stick, f_ct_max_wall);
+
+                    const vector_3d_t t_hat = {
+                        .x = vtrtv.x / vtrt,
+                        .y = vtrtv.y / vtrt,
+                        .z = vtrtv.z / vtrt,
+                    };
+
+                    // f_cn is in the same direction as the normal, but f_ct is
+                    // opposite to the velocity (how we defined t_hat).
+                    f_c.x = f_cn * normal.x - f_ct * t_hat.x;
+                    f_c.y = f_cn * normal.y - f_ct * t_hat.y;
+                    f_c.z = f_cn * normal.z - f_ct * t_hat.z;
+                }
 
                 const double deltaf[] = {
-                    s * (fw[0] - fn[0]),
-                    s * (fw[1] - fn[1]),
-                    s * (fw[2] - fn[2]),
+                    s * f_c.x,
+                    s * f_c.y,
+                    s * f_c.z,
                 };
 
                 f[i][0] = deltaf[0] + f[i][0];

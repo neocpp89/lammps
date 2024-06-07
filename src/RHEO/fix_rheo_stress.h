@@ -21,6 +21,7 @@ FixStyle(rheo/stress,FixRHEOStress);
 #define LMP_FIX_RHEO_STRESS_H
 
 #include "fix.h"
+#include "compute_rheo_stress.h"
 
 namespace LAMMPS_NS {
 
