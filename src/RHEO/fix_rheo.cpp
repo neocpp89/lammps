@@ -95,6 +95,7 @@ static size_t num_loaded_facets = 0;
 static double boundary_thickness = 0.01;
 static uint64_t sticky_bitmask = 0;
 static stl_voxel_grid_t voxel_grid = {0};
+static bool stl_double_sided = false;
 
 static void cross(vector_3d_t * const result,
                   const vector_3d_t * const a,
@@ -217,6 +218,8 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       // sticky_bitmask = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
       sticky_bitmask = strtoull(arg[iarg + 1], NULL, 0);
       iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/doublesided") == 0) {
+      stl_double_sided = true;
     } else if (strcmp(arg[iarg], "speed/sound") == 0) {
       if (iarg + n >= narg) error->all(FLERR, "Illegal csq option in fix rheo");
       for (i = 1; i <= n; i++) {
@@ -238,31 +241,52 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
     }
     parse_stl_file(loaded_facets, &num_loaded_facets, boundary_fp);
+
+    if (stl_double_sided) {
+        if ((2 * num_loaded_facets) < max_stl_facets) {
+            printf("double sided boundary\n");
+            for (size_t i = 0; i < num_loaded_facets; ++i) {
+                stl_facet_t * const entry = &loaded_facets[i];
+                stl_facet_t * const mirror_entry = &loaded_facets[i + num_loaded_facets];
+                *mirror_entry = *entry;
+                vector_3d_t tmp = mirror_entry->b;
+                mirror_entry->b = mirror_entry->a;
+                mirror_entry->a = tmp;
+                mirror_entry->normal.x = -mirror_entry->normal.x;
+                mirror_entry->normal.y = -mirror_entry->normal.y;
+                mirror_entry->normal.z = -mirror_entry->normal.z;
+            }
+            num_loaded_facets *= 2;
+        }
+    }
+
     for (size_t i = 0; i < num_loaded_facets; ++i) {
         stl_facet_t * const entry = &loaded_facets[i];
         if (i < 64) {
             entry->sticky = ((sticky_bitmask & (UINT64_C(1) << i)) != 0);
-            entry->thickness = boundary_thickness;
-
-            // If all three normal components are 0, assume that we're supposed
-            // to take the three vertices in increasing angle (counter
-            // clockwise) and compute the normal from those.
-            if (entry->normal.x == 0.0 &&
-                entry->normal.y == 0.0 &&
-                entry->normal.z == 0.0) {
-                // vectors from P to x.
-                vector_3d_t v_ab = {0};
-                vector_3d_t v_ac = {0};
-                vsub(&v_ab, &entry->b, &entry->a);
-                vsub(&v_ac, &entry->c, &entry->a);
-
-                // will actual normalize in next step.
-                vector_3d_t s = {0};
-                cross(&s, &v_ab, &v_ac);
-                entry->normal = s;
-            }
-            normalize(&entry->normal);
         }
+
+        entry->thickness = boundary_thickness;
+
+        // If all three normal components are 0, assume that we're supposed
+        // to take the three vertices in increasing angle (counter
+        // clockwise) and compute the normal from those.
+        if (entry->normal.x == 0.0 &&
+            entry->normal.y == 0.0 &&
+            entry->normal.z == 0.0) {
+            // vectors from P to x.
+            vector_3d_t v_ab = {0};
+            vector_3d_t v_ac = {0};
+            vsub(&v_ab, &entry->b, &entry->a);
+            vsub(&v_ac, &entry->c, &entry->a);
+
+            // will actual normalize in next step.
+            vector_3d_t s = {0};
+            cross(&s, &v_ab, &v_ac);
+            entry->normal = s;
+        }
+        normalize(&entry->normal);
+
         printf("facet %zu:\n", i);
         print_facet(entry);
     }
@@ -1009,63 +1033,67 @@ static void make_stl_voxel_grid(stl_voxel_grid_t *vgrid, const stl_facet_t * con
 
     {
         char filename[256] = {0};
-        const char dir[] = "/Crucial2TB/sdunatunga";
+        const char dir[] = "/home/sdunatunga/logs/";
         snprintf(filename, sizeof(filename), "%s/lmp_%p.csv", dir, vgrid->sdf_values);
         FILE *g = fopen(filename, "w");
-        fprintf(g, "x,y,z,s,n\n");
-        for (size_t i = 0; i < vgrid->ispan; ++i) {
-            const double xpx = vgrid->origin.x + (i * vgrid->dx);
-            for (size_t j = 0; j < vgrid->jspan; ++j) {
-                const double xpy = vgrid->origin.y + (j * vgrid->dy);
-                for (size_t k = 0; k < vgrid->kspan; ++k) {
-                    const double xpz = vgrid->origin.z + (k * vgrid->dz);
-                    const vector_3d_t xp = {
-                        .x = xpx,
-                        .y = xpy,
-                        .z = xpz,
-                    };
-                    const size_t sdf_index = sdf_index_from_spans(vgrid, i, j, k);
-                    const size_t n = (vgrid->triangle_lists[sdf_index] == NULL) ? 0 : vgrid->triangle_lists[sdf_index][0];
-                    fprintf(g, "%.17g,%.17g,%.17g,%.17g,%zu\n", xpx, xpy, xpz, vgrid->sdf_values[sdf_index], n);
+        if (g != NULL) {
+            fprintf(g, "x,y,z,s,n\n");
+            for (size_t i = 0; i < vgrid->ispan; ++i) {
+                const double xpx = vgrid->origin.x + (i * vgrid->dx);
+                for (size_t j = 0; j < vgrid->jspan; ++j) {
+                    const double xpy = vgrid->origin.y + (j * vgrid->dy);
+                    for (size_t k = 0; k < vgrid->kspan; ++k) {
+                        const double xpz = vgrid->origin.z + (k * vgrid->dz);
+                        const vector_3d_t xp = {
+                            .x = xpx,
+                            .y = xpy,
+                            .z = xpz,
+                        };
+                        const size_t sdf_index = sdf_index_from_spans(vgrid, i, j, k);
+                        const size_t n = (vgrid->triangle_lists[sdf_index] == NULL) ? 0 : vgrid->triangle_lists[sdf_index][0];
+                        fprintf(g, "%.17g,%.17g,%.17g,%.17g,%zu\n", xpx, xpy, xpz, vgrid->sdf_values[sdf_index], n);
+                    }
                 }
+                printf("%06zu / %06zu planes written to disk at %s.\n", i, vgrid->ispan, filename);
             }
-            printf("%06zu / %06zu planes written to disk at %s.\n", i, vgrid->ispan, filename);
+            fclose(g);
         }
-        fclose(g);
     }
 
     {
         char filename[256] = {0};
-        const char dir[] = "/Crucial2TB/sdunatunga";
+        const char dir[] = "/home/sdunatunga/logs/";
         snprintf(filename, sizeof(filename), "%s/lmpcell_%p.csv", dir, vgrid->cell_centered_triangle_lists);
         FILE *g = fopen(filename, "w");
-        fprintf(g, "x,y,z,s,n\n");
-        for (size_t i = 0; i < vgrid->ispan - 1; ++i) {
-            const double xpx = vgrid->origin.x + (i * vgrid->dx);
-            for (size_t j = 0; j < vgrid->jspan - 1; ++j) {
-                const double xpy = vgrid->origin.y + (j * vgrid->dy);
-                for (size_t k = 0; k < vgrid->kspan - 1; ++k) {
-                    const double xpz = vgrid->origin.z + (k * vgrid->dz);
-                    const vector_3d_t xp = {
-                        .x = xpx + vgrid->dx / 2.0,
-                        .y = xpy + vgrid->dy / 2.0,
-                        .z = xpz + vgrid->dz / 2.0,
-                    };
-                    const size_t sdf_cell_index = sdf_cell_index_from_spans(vgrid, i, j, k);
-                    const size_t n = (vgrid->cell_centered_triangle_lists[sdf_cell_index] == NULL) ? 0 : vgrid->cell_centered_triangle_lists[sdf_cell_index][0];
-                    if (n > 0) {
-                        fprintf(g, "%.17g,%.17g,%.17g,%zu\n", xp.x, xp.y, xp.z, n);
-                        fprintf(g, "#");
-                        for (size_t m = 0; m < n; ++m) {
-                            fprintf(g, " %zu", vgrid->cell_centered_triangle_lists[sdf_cell_index][m + 1]);
+        if (g != NULL) {
+            fprintf(g, "x,y,z,s,n\n");
+            for (size_t i = 0; i < vgrid->ispan - 1; ++i) {
+                const double xpx = vgrid->origin.x + (i * vgrid->dx);
+                for (size_t j = 0; j < vgrid->jspan - 1; ++j) {
+                    const double xpy = vgrid->origin.y + (j * vgrid->dy);
+                    for (size_t k = 0; k < vgrid->kspan - 1; ++k) {
+                        const double xpz = vgrid->origin.z + (k * vgrid->dz);
+                        const vector_3d_t xp = {
+                            .x = xpx + vgrid->dx / 2.0,
+                            .y = xpy + vgrid->dy / 2.0,
+                            .z = xpz + vgrid->dz / 2.0,
+                        };
+                        const size_t sdf_cell_index = sdf_cell_index_from_spans(vgrid, i, j, k);
+                        const size_t n = (vgrid->cell_centered_triangle_lists[sdf_cell_index] == NULL) ? 0 : vgrid->cell_centered_triangle_lists[sdf_cell_index][0];
+                        if (n > 0) {
+                            fprintf(g, "%.17g,%.17g,%.17g,%zu\n", xp.x, xp.y, xp.z, n);
+                            fprintf(g, "#");
+                            for (size_t m = 0; m < n; ++m) {
+                                fprintf(g, " %zu", vgrid->cell_centered_triangle_lists[sdf_cell_index][m + 1]);
+                            }
+                            fprintf(g, "\n");
                         }
-                        fprintf(g, "\n");
                     }
                 }
+                printf("%06zu / %06zu cell planes written to disk at %s.\n", i, vgrid->ispan - 1, filename);
             }
-            printf("%06zu / %06zu cell planes written to disk at %s.\n", i, vgrid->ispan - 1, filename);
+            fclose(g);
         }
-        fclose(g);
     }
 
     print_vector(&(vgrid->origin));
@@ -1811,14 +1839,9 @@ void FixRHEO::post_force(int /*vflag*/)
                     .z = 0.0,
                 };
 
-    // test for if force in pull-off yields ok result
-#if 0
                 if (vtrn > 0.0) {
                     // moving away from boundary, no contact forces.
                 } else {
-#else
-                {
-#endif
                     const double f_cn = -vtrn / dtfm;
 
                     const vector_3d_t vtrtv = {
