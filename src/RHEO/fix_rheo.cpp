@@ -61,6 +61,7 @@ typedef struct {
     vector_3d_t c;
     bool sticky;
     double thickness;
+    double mu;
 } stl_facet_t;
 
 typedef struct {
@@ -95,7 +96,20 @@ static size_t num_loaded_facets = 0;
 static double boundary_thickness = 0.01;
 static uint64_t sticky_bitmask = 0;
 static stl_voxel_grid_t voxel_grid = {0};
-static bool stl_double_sided = false;
+static double stl_vgrid_scale = 3.0;
+
+struct boundary_args {
+    const char *filepath;
+    // stl_facet_t *loaded_facets;
+    // size_t num_loaded_facets;
+    double thickness;
+    double mu;
+    bool double_sided;
+    bool sticky;
+};
+
+static struct boundary_args boundary_files_with_args[100];
+static size_t num_boundary_files_with_args = 0;
 
 static void cross(vector_3d_t * const result,
                   const vector_3d_t * const a,
@@ -106,6 +120,7 @@ static void vsub(vector_3d_t * const result,
 static void normalize(vector_3d_t *v);
 static void print_facet(const stl_facet_t * const facet);
 static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp);
+static bool parse_stl_with_args(stl_facet_t *facets, size_t *num_facets, const struct boundary_args * const args);
 
 static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet);
 static void make_stl_voxel_grid(stl_voxel_grid_t *vgrid, const stl_facet_t * const facets, size_t num_facets, double spacing);
@@ -130,8 +145,13 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
 
   int i;
   int n = atom->ntypes;
-  size_t max_stl_facets = 4096;
-  FILE *boundary_fp = NULL;
+  size_t max_stl_facets = 65536;
+  for (size_t i = 0; i < DIM(boundary_files_with_args); ++i) {
+    struct boundary_args * const entry = &boundary_files_with_args[i];
+    entry->thickness = boundary_thickness;
+  }
+
+  struct boundary_args * boundary_arg = NULL;
   memory->create(rho0, n + 1, "rheo:rho0");
   memory->create(csq, n + 1, "rheo:csq");
   for (i = 1; i <= n; i++) {
@@ -202,11 +222,15 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       iarg += n;
     } else if (strcmp(arg[iarg], "boundary/stlfile") == 0) {
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal stlfile option in fix rheo");
-      boundary_fp = fopen(arg[iarg + 1], "r");
+      // shift to next boundary arg file
+      num_boundary_files_with_args++;
+      boundary_arg = &boundary_files_with_args[num_boundary_files_with_args-1];
+      boundary_arg->filepath = arg[iarg + 1];
       iarg += 1;
     } else if (strcmp(arg[iarg], "boundary/rampthickness") == 0) {
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal ramp thickness option in fix rheo");
-      boundary_thickness  = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->thickness  = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 1;
     } else if (strcmp(arg[iarg], "boundary/stlmaxfacets") == 0) {
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal number of max stl facets.");
@@ -219,7 +243,20 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       sticky_bitmask = strtoull(arg[iarg + 1], NULL, 0);
       iarg += 1;
     } else if (strcmp(arg[iarg], "boundary/doublesided") == 0) {
-      stl_double_sided = true;
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->double_sided = true;
+    } else if (strcmp(arg[iarg], "boundary/sticky") == 0) {
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->sticky = true;
+    } else if (strcmp(arg[iarg], "boundary/mu") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal boundary mu (friction) option in fix rheo");
+      if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
+      boundary_arg->mu = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 1;
+    } else if (strcmp(arg[iarg], "boundary/vgridscale") == 0) {
+      if (iarg + 1 >= narg) error->all(FLERR, "Illegal voxel grid scale option in fix rheo");
+      stl_vgrid_scale = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
+      iarg += 1;
     } else if (strcmp(arg[iarg], "speed/sound") == 0) {
       if (iarg + n >= narg) error->all(FLERR, "Illegal csq option in fix rheo");
       for (i = 1; i <= n; i++) {
@@ -233,68 +270,44 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
     iarg += 1;
   }
 
-  if (boundary_fp != NULL) {
-    // num_loaded_facets = DIM(loaded_facets);
+  if (num_boundary_files_with_args > 0) {
     num_loaded_facets = max_stl_facets;
     loaded_facets = static_cast<stl_facet_t *>(calloc(max_stl_facets, sizeof(loaded_facets[0])));
     if (loaded_facets == NULL) {
         error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
     }
-    parse_stl_file(loaded_facets, &num_loaded_facets, boundary_fp);
-
-    if (stl_double_sided) {
-        if ((2 * num_loaded_facets) < max_stl_facets) {
-            printf("double sided boundary\n");
-            for (size_t i = 0; i < num_loaded_facets; ++i) {
-                stl_facet_t * const entry = &loaded_facets[i];
-                stl_facet_t * const mirror_entry = &loaded_facets[i + num_loaded_facets];
-                *mirror_entry = *entry;
-                vector_3d_t tmp = mirror_entry->b;
-                mirror_entry->b = mirror_entry->a;
-                mirror_entry->a = tmp;
-                mirror_entry->normal.x = -mirror_entry->normal.x;
-                mirror_entry->normal.y = -mirror_entry->normal.y;
-                mirror_entry->normal.z = -mirror_entry->normal.z;
-            }
-            num_loaded_facets *= 2;
-        }
-    }
-
-    for (size_t i = 0; i < num_loaded_facets; ++i) {
-        stl_facet_t * const entry = &loaded_facets[i];
-        if (i < 64) {
-            entry->sticky = ((sticky_bitmask & (UINT64_C(1) << i)) != 0);
-        }
-
-        entry->thickness = boundary_thickness;
-
-        // If all three normal components are 0, assume that we're supposed
-        // to take the three vertices in increasing angle (counter
-        // clockwise) and compute the normal from those.
-        if (entry->normal.x == 0.0 &&
-            entry->normal.y == 0.0 &&
-            entry->normal.z == 0.0) {
-            // vectors from P to x.
-            vector_3d_t v_ab = {0};
-            vector_3d_t v_ac = {0};
-            vsub(&v_ab, &entry->b, &entry->a);
-            vsub(&v_ac, &entry->c, &entry->a);
-
-            // will actual normalize in next step.
-            vector_3d_t s = {0};
-            cross(&s, &v_ab, &v_ac);
-            entry->normal = s;
-        }
-        normalize(&entry->normal);
-
-        printf("facet %zu:\n", i);
-        print_facet(entry);
-    }
-    fclose(boundary_fp);
-
-    make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, 3.0 * h);
-    // make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, 5.0 * boundary_thickness);
+    num_loaded_facets = 0;
   }
+
+  for (size_t i = 0; i < num_boundary_files_with_args; ++i) {
+    const struct boundary_args * const entry = &boundary_files_with_args[i];
+    size_t local_loaded_facets = max_stl_facets;
+    stl_facet_t * const facets = static_cast<stl_facet_t *>(calloc(max_stl_facets, sizeof(loaded_facets[0])));
+    if (facets == NULL) {
+        error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
+    }
+
+    const bool success = parse_stl_with_args(facets, &local_loaded_facets, entry);
+    if (!success) {
+        error->all(FLERR, "Failed to parse STL file {}.", entry->filepath);
+    }
+
+    for (size_t j = 0; j < local_loaded_facets; ++j) {
+        if (num_loaded_facets >= max_stl_facets) {
+            error->all(FLERR, "Combined STL file loads exceeds {} facets.", max_stl_facets);
+        }
+        loaded_facets[num_loaded_facets] = facets[j];
+        printf("facet %zu:\n", num_loaded_facets);
+        print_facet(&loaded_facets[num_loaded_facets]);
+        num_loaded_facets++;
+    }
+
+    free(facets);
+  }
+
+  // if (num_loaded_facets > 0) {
+    make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, stl_vgrid_scale * h);
+  // }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -789,6 +802,75 @@ static bool parse_stl_file(stl_facet_t *facets, size_t *num_facets, FILE *fp)
     return true;
 }
 
+
+static bool parse_stl_with_args(stl_facet_t *facets, size_t *num_facets, const struct boundary_args * const args)
+{
+  const size_t capacity = *num_facets;
+  FILE *boundary_fp = fopen(args->filepath, "r");
+  if (boundary_fp == NULL) {
+    return false;
+  } else {
+    bool success = parse_stl_file(facets, num_facets, boundary_fp);
+    fclose(boundary_fp);
+
+    if (!success) {
+      return false;
+    }
+
+    size_t local_num_loaded_facets = *num_facets;
+    if (args->double_sided) {
+        if ((2 * local_num_loaded_facets) < capacity) {
+            printf("double sided boundary\n");
+            for (size_t i = 0; i < local_num_loaded_facets; ++i) {
+                stl_facet_t * const entry = &facets[i];
+                stl_facet_t * const mirror_entry = &facets[i + local_num_loaded_facets];
+                *mirror_entry = *entry;
+                vector_3d_t tmp = mirror_entry->b;
+                mirror_entry->b = mirror_entry->a;
+                mirror_entry->a = tmp;
+                mirror_entry->normal.x = -mirror_entry->normal.x;
+                mirror_entry->normal.y = -mirror_entry->normal.y;
+                mirror_entry->normal.z = -mirror_entry->normal.z;
+            }
+            local_num_loaded_facets *= 2;
+        }
+    }
+
+    for (size_t i = 0; i < local_num_loaded_facets; ++i) {
+        stl_facet_t * const entry = &facets[i];
+        entry->sticky = args->sticky;
+        entry->thickness = args->thickness;
+        entry->mu = args->mu;
+
+        // If all three normal components are 0, assume that we're supposed
+        // to take the three vertices in increasing angle (counter
+        // clockwise) and compute the normal from those.
+        if (entry->normal.x == 0.0 &&
+            entry->normal.y == 0.0 &&
+            entry->normal.z == 0.0) {
+            // vectors from P to x.
+            vector_3d_t v_ab = {0};
+            vector_3d_t v_ac = {0};
+            vsub(&v_ab, &entry->b, &entry->a);
+            vsub(&v_ac, &entry->c, &entry->a);
+
+            // will actual normalize in next step.
+            vector_3d_t s = {0};
+            cross(&s, &v_ab, &v_ac);
+            entry->normal = s;
+        }
+        normalize(&entry->normal);
+
+        // printf("facet %zu:\n", i);
+        // print_facet(entry);
+    }
+
+    *num_facets = local_num_loaded_facets;
+    return true;
+  }
+  return false;
+}
+
 static void print_vector(const vector_3d_t * const v)
 {
     printf("{%.17g, %.17g, %.17g}\n", v->x, v->y, v->z);
@@ -1222,7 +1304,7 @@ static void sdf_and_normal_from_vgrid_old(double *sdf, vector_3d_t *normal, bool
     normalize(normal);
 }
 
-static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
+static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
 {
     if (
         (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
@@ -1306,6 +1388,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, bool *st
             // Clip the last closest tenth so there's a bit of dead zone where the
             // BC is at full strength.
             *sdf = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
+            *facet_index = min_wall_index;
         } else {
             *sdf = 0.0;
         }
@@ -1679,7 +1762,8 @@ void FixRHEO::post_force(int /*vflag*/)
         double s = 0.0;
         bool is_any_wall_sticky = false;
         uint64_t walls_bitset = 0;
-        sdf_and_normal_from_vgrid(&s, &fdir, &is_any_wall_sticky, &voxel_grid, &xp);
+        size_t facet_index = 0;
+        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp);
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
@@ -1809,7 +1893,9 @@ void FixRHEO::post_force(int /*vflag*/)
                 stress[i][7] = deltaf[1];
                 stress[i][8] = deltaf[2];
 #endif
-                const double mu_wall = 0.3;
+                // facet_index
+                // const double mu_wall = 0.3;
+                const double mu_wall = loaded_facets[facet_index].mu;
 
                 const vector_3d_t normal = fdir;
 
