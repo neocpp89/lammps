@@ -301,9 +301,9 @@ void PairRHEOGranular::compute(int eflag, int vflag)
             sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
             sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
 
-            sdiv[j][0] += Voli * sdotdw[0];
-            sdiv[j][1] += Voli * sdotdw[1];
-            sdiv[j][2] += Voli * sdotdw[2];
+            sdiv[j][0] += sdotdw[0];
+            sdiv[j][1] += sdotdw[1];
+            sdiv[j][2] += sdotdw[2];
 
             f[j][0] -= dfp[0];
             f[j][1] -= dfp[1];
