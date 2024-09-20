@@ -187,8 +187,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
 
   if (narg < 5) utils::missing_cmd_args(FLERR, "fix rheo", error);
 
-  h = utils::numeric(FLERR, arg[3], false, lmp);
-  cut = h;
+  cut = utils::numeric(FLERR, arg[3], false, lmp);
   if (strcmp(arg[4], "quintic") == 0) {
     kernel_style = QUINTIC;
   } else if (strcmp(arg[4],"cubic") == 0) {
@@ -330,7 +329,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   }
 
   // if (num_loaded_facets > 0) {
-    make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, stl_vgrid_scale * h);
+    make_stl_voxel_grid(&voxel_grid, loaded_facets, num_loaded_facets, stl_vgrid_scale * cut);
   // }
 }
 
@@ -2007,7 +2006,7 @@ void FixRHEO::initial_integrate(int /*vflag*/)
 
   int *type = atom->type;
   int *mask = atom->mask;
-  int *status = atom->status;
+  int *status = atom->rheo_status;
   double **x = atom->x;
   double **v = atom->v;
   double **f = atom->f;
@@ -2081,9 +2080,10 @@ void FixRHEO::initial_integrate(int /*vflag*/)
               if (status[i] & STATUS_NO_INTEGRATION) continue;
               if (status[i] & PHASECHECK) continue;
 
-        divu = 0;
-        for (a = 0; a < dim; a++) { divu += gradv[i][a * (1 + dim)]; }
-        rho[i] += dtf * (drho[i] - rho[i] * divu);
+          divu = 0;
+          for (a = 0; a < dim; a++) { divu += gradv[i][a * (1 + dim)]; }
+          rho[i] += dtf * (drho[i] - rho[i] * divu);
+        }
       }
   }
 
@@ -2091,18 +2091,19 @@ void FixRHEO::initial_integrate(int /*vflag*/)
   if (shift_flag) {
       for (i = 0; i < nlocal; i++) {
 
-      if (status[i] & STATUS_NO_SHIFT) continue;
-      if (status[i] & PHASECHECK) continue;
+        if (status[i] & STATUS_NO_SHIFT) continue;
+        if (status[i] & PHASECHECK) continue;
 
-      if (mask[i] & groupbit) {
-        for (a = 0; a < dim; a++) {
-          x[i][a] += dtv * vshift[i][a];
-          for (b = 0; b < dim; b++) { v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b]; }
-        }
+        if (mask[i] & groupbit) {
+          for (a = 0; a < dim; a++) {
+            x[i][a] += dtv * vshift[i][a];
+            for (b = 0; b < dim; b++) { v[i][a] += dtv * vshift[i][b] * gradv[i][a * dim + b]; }
+          }
 
-        if (!rhosum_flag) {
-          if (status[i] & PHASECHECK) continue;
-          for (a = 0; a < dim; a++) { rho[i] += dtv * vshift[i][a] * gradr[i][a]; }
+          if (!rhosum_flag) {
+            if (status[i] & PHASECHECK) continue;
+            for (a = 0; a < dim; a++) { rho[i] += dtv * vshift[i][a] * gradr[i][a]; }
+          }
         }
       }
   }

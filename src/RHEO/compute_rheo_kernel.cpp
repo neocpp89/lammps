@@ -140,6 +140,7 @@ void ComputeRHEOKernel::init()
       pre_w = 9.0 / (MY_PI * cutsq);
       pre_wp = pre_w * cutinv;
     }
+  }
 
   nmax_store = atom->nmax;
   memory->create(coordination, nmax_store, "rheo:coordination");
@@ -298,7 +299,7 @@ double ComputeRHEOKernel::calc_dw_cubic(int i, int j, double delx, double dely, 
   }
 
   wp *= alpha_d;
-  wprinv = wp / (r * h);
+  wprinv = wp / (r * cut);
   dW1[0] = delx * wprinv;
   dW1[1] = dely * wprinv;
   dW1[2] = delz * wprinv;

@@ -97,7 +97,6 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
   double hinv = 1.0 / h;
   double hinv3 = hinv * 3.0;
-  double cs = sqrt(csq);
 
   ev_init(eflag, vflag);
 
@@ -111,7 +110,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   double **stress = fix_stress->array_atom;
   double *special_lj = force->special_lj;
   int *type = atom->type;
-  int *status = atom->status;
+  int *status = atom->rheo_status;
 
   double **fp_store, *chi;
   if (compute_interface) {
@@ -175,12 +174,12 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         rhoj = rho[j];
         if (interface_flag) {
           if (fluidi && (!fluidj)) {
-            rhoj = compute_interface->correct_rho(j, i);
+            rhoj = compute_interface->correct_rho(j);
           } else if ((!fluidi) && fluidj) {
-            rhoi = compute_interface->correct_rho(i, j);
+            rhoi = compute_interface->correct_rho(i);
           } else if ((!fluidi) && (!fluidj)) {
-            rhoi = rho0;
-            rhoj = rho0;
+            rhoi = rho0[itype];
+            rhoj = rho0[jtype];
           }
         }
 
@@ -209,7 +208,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
             mu = dot3(du, dx) * hinv3;
             mu /= (rsq * hinv3 * hinv3 + EPSILON);
             mu = MIN(0.0, mu);
-            q = av * (-2.0 * cs * mu + mu * mu);
+            q = av * (-2.0 * cs[itype] * mu + mu * mu);
             fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
             scale3(-fp_prefactor, dWij, dfp);
 
@@ -463,11 +462,16 @@ void PairRHEOGranular::setup()
   rho0 = fix_rheo->rho0;
   csq = fix_rheo->csq;
 
+  int n = atom->ntypes;
+  memory->create(cs, n + 1, "rheo:cs");
+  for (int i = 1; i <= n; i++)
+    cs[i] = sqrt(csq[i]);
+
   // TODO: another Law of Demeter violation, figure out how to fix
   dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
 
-  if (h != fix_rheo->h)
-    error->all(FLERR, "Pair rheo cutoff {} does not agree with fix rheo cutoff {}", h, fix_rheo->h);
+  if (h!= fix_rheo->cut)
+    error->all(FLERR, "Pair rheo cutoff {} does not agree with fix rheo cutoff {}", h, fix_rheo->cut);
 
   hsq = h * h;
 }
