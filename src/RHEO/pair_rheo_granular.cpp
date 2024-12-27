@@ -23,11 +23,11 @@
 #include "compute_rheo_kernel.h"
 #include "compute_rheo_grad.h"
 #include "compute_rheo_interface.h"
-#include "compute_rheo_stress.h"
 #include "domain.h"
 #include "error.h"
 #include "fix_rheo.h"
 #include "fix_rheo_stress.h"
+#include "fix_store_atom.h"
 #include "force.h"
 #include "math_extra.h"
 #include "memory.h"
@@ -107,7 +107,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   double *rho = atom->rho;
   double *drho = atom->drho;
   double *mass = atom->mass;
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
   double *special_lj = force->special_lj;
   int *type = atom->type;
   int *status = atom->rheo_status;
@@ -423,6 +423,7 @@ void PairRHEOGranular::setup()
   fixes = modify->get_fix_by_style("rheo/stress");
   if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
   fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
+  fix_stress->fix_rheo = fix_rheo;
 
   compute_kernel = fix_rheo->compute_kernel;
   compute_grad = fix_rheo->compute_grad;
@@ -435,9 +436,6 @@ void PairRHEOGranular::setup()
   memory->create(cs, n + 1, "rheo:cs");
   for (int i = 1; i <= n; i++)
     cs[i] = sqrt(csq[i]);
-
-  // TODO: another Law of Demeter violation, figure out how to fix
-  dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute)->fix_rheo = fix_rheo;
 
   if (h!= fix_rheo->cut)
     error->all(FLERR, "Pair rheo cutoff {} does not agree with fix rheo cutoff {}", h, fix_rheo->cut);

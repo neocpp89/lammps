@@ -21,7 +21,6 @@ FixStyle(rheo/oxidation,FixRHEOOxidation)
 #define LMP_FIX_RHEO_OXIDATION_H
 
 #include "fix.h"
-#include "compute_rheo_stress.h"
 
 #include <vector>
 
@@ -43,9 +42,6 @@ class FixRHEOOxidation : public Fix {
   int *nbond;
   double rsurf, cut;
 
-  // Hack so I can set fix_rheo in this later
-  class Compute *stress_compute;
-
  private:
   int btype, index_nb;
   double cutsq;
@@ -53,11 +49,6 @@ class FixRHEOOxidation : public Fix {
   class NeighList *list;
   class ComputeRHEOSurface *compute_surface;
   class FixRHEO *fix_rheo;
-
-  char *id_compute, *id_fix;
-  // class Compute *stress_compute;
-  class FixStoreAtom *store_fix;
-  std::string property_list_for_compute;
 };
 
 }    // namespace LAMMPS_NS

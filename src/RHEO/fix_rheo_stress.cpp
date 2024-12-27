@@ -20,8 +20,11 @@
 #include "atom.h"
 #include "comm.h"
 #include "compute.h"
+#include "compute_rheo_grad.h"
 #include "domain.h"
+#include "fix_rheo.h"
 #include "fix_store_atom.h"
+#include "force.h"
 #include "group.h"
 #include "error.h"
 #include "modify.h"
@@ -38,31 +41,44 @@ using namespace FixConst;
 #define DIM(x) (sizeof(x) / sizeof(x[0]))
 #endif
 
+// #define SD_PRINTF(args...) printf(args);
+#define SD_PRINTF(args...)
+#define DEBUG_PRINTF(args...) printf(args);
+#define DUMP_PROPERTY(x) DEBUG_PRINTF("%s = %.17g\n", #x, x)
+
+enum {
+    NUM_STRESS_COMPONENTS = 32,
+};
+
 struct material_property {
   bool required;
   const char *name;
   double value;
+  double *ptr;
   bool set_by_input_file;
 };
 
 /* ---------------------------------------------------------------------- */
 
 FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
-  id_compute(nullptr), id_fix(nullptr), stress_compute(nullptr), store_fix(nullptr), Fix(lmp, narg, arg)
+  id_fix(nullptr), store_fix(nullptr), fix_rheo(nullptr), Fix(lmp, narg, arg)
 {
   struct material_property properties[] = {
-    { .required = true, .name = "rho_critical", .value = 1.0, .set_by_input_file = false, },
-    { .required = true, .name = "E", .value = 1e4, .set_by_input_file = false, },
-    { .required = true, .name = "nu", .value = 0.0, .set_by_input_file = false, },
-    { .required = true, .name = "cohesion", .value = 0.0, .set_by_input_file = false, },
-    { .required = true, .name = "grains_d", .value = 0.005, .set_by_input_file = false, },
-    { .required = true, .name = "grains_rho", .value = 2450.0, .set_by_input_file = false, },
-    { .required = true, .name = "mu_s", .value = 0.3819, .set_by_input_file = false, },
-    { .required = true, .name = "mu_2", .value = 0.6435, .set_by_input_file = false, },
-    { .required = true, .name = "I_0", .value = 0.278, .set_by_input_file = false, },
+    { .required = true, .name = "rho_critical", .value = 1.0, .ptr = &RHO_CRITICAL, .set_by_input_file = false, },
+    { .required = true, .name = "E", .value = 1e4, .ptr = &E, .set_by_input_file = false, },
+    { .required = true, .name = "nu", .value = 0.0, .ptr = &NU, .set_by_input_file = false, },
+    { .required = true, .name = "cohesion", .value = 0.0, .ptr = &COHESION, .set_by_input_file = false, },
+    { .required = true, .name = "grains_d", .value = 0.005, .ptr = &GRAINS_D, .set_by_input_file = false, },
+    { .required = true, .name = "grains_rho", .value = 2450.0, .ptr = &GRAINS_RHO, .set_by_input_file = false, },
+    { .required = true, .name = "mu_s", .value = 0.3819, .ptr = &MU_S, .set_by_input_file = false, },
+    { .required = true, .name = "mu_2", .value = 0.6435, .ptr = &MU_2, .set_by_input_file = false, },
+    { .required = true, .name = "I_0", .value = 0.278, .ptr = &I_0, .set_by_input_file = false, },
   };
 
+  size_peratom_cols = NUM_STRESS_COMPONENTS;
+  peratom_flag = 1;
   comm_forward = NUM_STRESS_COMPONENTS;
+  comm_reverse = NUM_STRESS_COMPONENTS;
 
   int iarg = 3;
   while (iarg < narg) {
@@ -87,19 +103,20 @@ FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
     ++iarg;
   }
 
-  // Will include a trailing space, hopefully ok.
-  property_list_for_compute = "";
   for (size_t i = 0; i < DIM(properties); ++i) {
     struct material_property * const entry = &properties[i];
-    property_list_for_compute += fmt::format("{} {:.17g} ", entry->name, entry->value);
+    *(entry->ptr) = entry->value;
   }
+
+  G = E / (2.0 * (1.0 + NU));
+  K = E / (3.0 * (1.0 - 2*NU));
+  LAMBDA = K - 2.0 * G / 3.0;
 }
 
 /* ---------------------------------------------------------------------- */
 
 FixRHEOStress::~FixRHEOStress()
 {
-  modify->delete_compute(id_compute);
   modify->delete_fix(id_fix);
 }
 
@@ -112,10 +129,6 @@ void FixRHEOStress::post_constructor()
   // Flags are Array type (X 0), 1 Restart, 1 Ghost
   store_fix = dynamic_cast<FixStoreAtom *>(modify->add_fix(fmt::format("{} {} STORE/ATOM {} 0 1 1", id_fix, group->names[igroup], std::to_string(NUM_STRESS_COMPONENTS))));
   array_atom = store_fix->astore;
-
-  id_compute = utils::strdup(std::string(id) + "_compute");
-  // stress_compute = modify->add_compute(fmt::format("{} {} stress/atom NULL ke pair bond", id_compute, group->names[igroup]));
-  stress_compute = modify->add_compute(fmt::format("{} {} RHEO/STRESS {}", id_compute, group->names[igroup], property_list_for_compute));
 }
 
 /* ---------------------------------------------------------------------- */
@@ -132,25 +145,79 @@ int FixRHEOStress::setmask()
 
 void FixRHEOStress::init()
 {
-  stress_compute->addstep(update->ntimestep+1);
+  DUMP_PROPERTY(RHO_CRITICAL);
+  DUMP_PROPERTY(E);
+  DUMP_PROPERTY(NU);
+  DUMP_PROPERTY(COHESION);
+  DUMP_PROPERTY(GRAINS_D);
+  DUMP_PROPERTY(GRAINS_RHO);
+  DUMP_PROPERTY(MU_S);
+  DUMP_PROPERTY(MU_2);
+  DUMP_PROPERTY(I_0);
+  DUMP_PROPERTY(G);
+  DUMP_PROPERTY(K);
+  DUMP_PROPERTY(LAMBDA);
+
+  // one_element_test();
+
+  modify->addstep_compute(update->ntimestep + 1);
 }
 
 /* ---------------------------------------------------------------------- */
 
+void FixRHEOStress::compute_peratom()
+{
+  const int nlocal = atom->nlocal;
+
+  if (fix_rheo == nullptr) {
+    error->all(FLERR, "fix rheo not set");
+  }
+
+  if (fix_rheo->compute_grad == nullptr) {
+    error->all(FLERR, "fix rheo gradient computation not set");
+  }
+
+  // TODO: fix, violates Law of Demeter
+  double **velocity_gradient = fix_rheo->compute_grad->gradv;
+  const double *rho = atom->rho;
+
+  // initialize arrays
+  // if (atom->nmax > nmax_store) {
+  //   grow_arrays(atom->nmax);
+  // }
+
+  for (int i = 0; i < nlocal; ++i) {
+    double *T = store_fix->astore[i];
+    const double *L = velocity_gradient[i];
+    const double density = rho[i];
+    const int dim = domain->dimension;
+    const double dt = update->dt;
+
+    double rho_pressure = 0;
+    double nup_tau = 0;
+    double tr_t0 = 0;
+    double txxdev = 0;
+    update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+    // update_one_material_point_stress_elastic(T, L, density, dt, dim);
+
+    if (atom->tag[i] == 1) {
+        SD_PRINTF("txx %17.9g\n", T[VoigtXX]);
+        SD_PRINTF("txy %17.9g\n", T[VoigtXY]);
+        SD_PRINTF("tyy %17.9g\n", T[VoigtYY]);
+    }
+  }
+}
+
+
 void FixRHEOStress::pre_force(int vflag)
 {
-  stress_compute->compute_peratom();
+  if (force->newton) {
+    comm->reverse_comm(this);
+  }
 
-  // copy compute to fix property atom
-  double **saved_stress = store_fix->astore;
-  double **stress = stress_compute->array_atom;
+  compute_peratom();
 
-  const int ntotal = atom->nlocal+atom->nghost;
-  for (int i = 0; i < ntotal; i++)
-    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++)
-      saved_stress[i][a] = stress[i][a];
-
-  stress_compute->addstep(update->ntimestep + 1);
+  modify->addstep_compute(update->ntimestep + 1);
 
   // add pre-force and forward to ghosts (not done in store/atom)
   comm->forward_comm(this);
@@ -191,4 +258,481 @@ void FixRHEOStress::unpack_forward_comm(int n, int first, double *buf)
   for (i = first; i < last; i++)
     for (a = 0; a < NUM_STRESS_COMPONENTS; a++)
       saved_stress[i][a] = buf[m++];
+}
+
+/* ---------------------------------------------------------------------- */
+
+int FixRHEOStress::pack_reverse_comm(int n, int first, double *buf)
+{
+  int i,k,m,last;
+  double **saved_stress = store_fix->astore;
+
+  m = 0;
+  last = first + n;
+  for (i = first; i < last; i++) {
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
+      buf[m++] = saved_stress[i][k];
+  }
+  return m;
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixRHEOStress::unpack_reverse_comm(int n, int *list, double *buf)
+{
+  int i,k,j,m;
+  double **saved_stress = store_fix->astore;
+
+  m = 0;
+  for (i = 0; i < n; i++) {
+    j = list[i];
+    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
+      saved_stress[j][k] = buf[m++];
+      // saved_stress[j][k] += buf[m++];
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+
+#if 0
+void FixRHEOStress::grow_arrays(int nmax)
+{
+  memory->grow(stress, nmax, NUM_STRESS_COMPONENTS, "rheo:stress");
+  array_atom = stress;
+  nmax_store = nmax;
+}
+
+/* ---------------------------------------------------------------------- */
+
+double FixRHEOStress::memory_usage()
+{
+  return (size_t) nmax_store * NUM_STRESS_COMPONENTS * sizeof(double);
+}
+
+/* ---------------------------------------------------------------------- */
+#endif
+
+static double negative_root(double a, double b, double c)
+{
+    double x;
+    if (b > 0) {
+        x = (-b - sqrt(b*b - 4*a*c)) / (2*a);
+    } else {
+        x = (2*c) / (-b + sqrt(b*b - 4*a*c));
+    }
+    return x;
+}
+
+enum {
+  VoigtXX = 0,
+  VoigtYY = 1,
+  VoigtZZ = 2,
+  VoigtXY = 3,
+  VoigtXZ = 4,
+  VoigtYZ = 5,
+};
+
+enum {
+  Full3XX = 0,
+  Full3XY = 1,
+  Full3XZ = 2,
+  Full3YX = 3,
+  Full3YY = 4,
+  Full3YZ = 5,
+  Full3ZX = 6,
+  Full3ZY = 7,
+  Full3ZZ = 8,
+};
+
+enum {
+  Full2XX = 0,
+  Full2XY = 1,
+  Full2YX = 2,
+  Full2YY = 3,
+};
+
+static void full_from_voigt(double *full, const double *voigt)
+{
+  full[Full3XX] = voigt[VoigtXX];
+  full[Full3XY] = voigt[VoigtXY];
+  full[Full3XZ] = voigt[VoigtXZ];
+  full[Full3YX] = voigt[VoigtXY];
+  full[Full3YY] = voigt[VoigtYY];
+  full[Full3YZ] = voigt[VoigtYZ];
+  full[Full3ZX] = voigt[VoigtXZ];
+  full[Full3ZY] = voigt[VoigtYZ];
+  full[Full3ZZ] = voigt[VoigtZZ];
+}
+
+static void voigt_from_sym_full(double *voigt, const double *full)
+{
+  voigt[VoigtXX] = full[Full3XX];
+  voigt[VoigtYY] = full[Full3YY];
+  voigt[VoigtZZ] = full[Full3ZZ];
+  voigt[VoigtXY] = full[Full3XY];
+  voigt[VoigtXZ] = full[Full3XZ];
+  voigt[VoigtYZ] = full[Full3YZ];
+}
+
+static void skw_part(double *skw_A, const double *A, int dim)
+{
+  if (dim == 3) {
+    skw_A[Full3XX] = 0.0;
+    skw_A[Full3YY] = 0.0;
+    skw_A[Full3ZZ] = 0.0;
+
+    skw_A[Full3XY] = 0.5 * (A[Full3XY] - A[Full3YX]);
+    skw_A[Full3YX] = -skw_A[Full3XY];
+    skw_A[Full3XZ] = 0.5 * (A[Full3XZ] - A[Full3ZX]);
+    skw_A[Full3ZX] = -skw_A[Full3XZ];
+    skw_A[Full3YZ] = 0.5 * (A[Full3YZ] - A[Full3ZY]);
+    skw_A[Full3ZY] = -skw_A[Full3YZ];
+  } else if (dim == 2) {
+    // Always expands into a full 3x3 tensor, not a typo.
+    skw_A[Full3XX] = 0.0;
+    skw_A[Full3YY] = 0.0;
+
+    skw_A[Full3XY] = 0.5 * (A[Full2XY] - A[Full2YX]);
+    skw_A[Full3YX] = -skw_A[Full3XY];
+  }
+}
+
+static void sym_part(double *sym_A, const double *A, int dim)
+{
+  if (dim == 3) {
+    sym_A[Full3XX] = A[Full3XX];
+    sym_A[Full3YY] = A[Full3YY];
+    sym_A[Full3ZZ] = A[Full3ZZ];
+
+    sym_A[Full3XY] = 0.5 * (A[Full3XY] + A[Full3YX]);
+    sym_A[Full3YX] = sym_A[Full3XY];
+    sym_A[Full3XZ] = 0.5 * (A[Full3XZ] + A[Full3ZX]);
+    sym_A[Full3ZX] = sym_A[Full3XZ];
+    sym_A[Full3YZ] = 0.5 * (A[Full3YZ] + A[Full3ZY]);
+    sym_A[Full3ZY] = sym_A[Full3YZ];
+  } else if (dim == 2) {
+    // Always expands into a full 3x3 tensor, not a typo.
+    sym_A[Full3XX] = A[Full2XX];
+    sym_A[Full3YY] = A[Full2YY];
+
+    sym_A[Full3XY] = 0.5 * (A[Full2XY] + A[Full2YX]);
+    sym_A[Full3YX] = sym_A[Full3XY];
+  }
+}
+
+static void scale(double *A, double s)
+{
+  for (size_t i = 0; i < 9; ++i) {
+    A[i] *= s;
+  }
+}
+
+static void accumulate(double *A, const double *B)
+{
+  for (size_t i = 0; i < 9; ++i) {
+    A[i] += B[i];
+  }
+}
+
+static double trace(const double *A)
+{
+  return A[Full3XX] + A[Full3YY] + A[Full3ZZ];
+}
+
+static void copy(double *A, const double *B)
+{
+  for (size_t i = 0; i < 9; ++i) {
+    A[i] = B[i];
+  }
+}
+
+static void deviator(double *A)
+{
+  const double one_third_trA = trace(A) / 3.0;
+  A[Full3XX] -= one_third_trA;
+  A[Full3YY] -= one_third_trA;
+  A[Full3ZZ] -= one_third_trA;
+}
+
+static double frobenius_norm(double *A)
+{
+  double s = 0;
+  for (size_t i = 0; i < 9; ++i) {
+    s += (A[i] * A[i]);
+  }
+  return sqrt(s);
+}
+
+static void identity(double *A)
+{
+  for (size_t i = 0; i < 9; ++i) {
+    A[i] = 0;
+  }
+  A[Full3XX] = 1.0;
+  A[Full3YY] = 1.0;
+  A[Full3ZZ] = 1.0;
+}
+
+static void multiply(double *C, const double *A, const double *B)
+{
+  for (size_t i = 0; i < 3; ++i) {
+    for (size_t j = 0; j < 3; ++j) {
+      C[(3 * i) + j] = 0;
+      for (size_t k = 0; k < 3; ++k) {
+        C[(3 * i) + j] += (A[(3 * i) + k] * B[(3 * k) + j]);
+      }
+    }
+  }
+}
+
+void FixRHEOStress::update_one_material_point_stress_elastic(double *cauchy_stress,
+    const double *velocity_gradient, double density, double dt, int dim)
+{
+    // Assume velocity gradient is laid out like
+    //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
+    const double *L = velocity_gradient;
+
+
+    // Assume stress is laid out in voigt form like
+    //   Txx, Tyy, Tzz, Txy, Txz, Tyz
+    // then expand.
+    double T[9] = {0};
+    full_from_voigt(T, cauchy_stress);
+
+    double D[9] = {0};
+    double W[9] = {0};
+
+    skw_part(W, L, dim);
+    sym_part(D, L, dim);
+
+    /* trial elastic increment using jaumann rate */
+    double tmp[9] = {0};
+    identity(tmp);
+    scale(tmp, LAMBDA * trace(D));
+
+    double jaumann_stress_increment[9] = {0};
+    copy(jaumann_stress_increment, D);
+    scale(jaumann_stress_increment, 2.0 * G);
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, W, T);
+    // if (tmp[0] != 0.0) {
+    //     SD_PRINTF("WTxx = %17.9g\n", tmp[0]);
+    //     SD_PRINTF("Txx = %17.9g\n", T[0]);
+    //     SD_PRINTF("Wxx = %17.9g\n", W[0]);
+    // }
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, T, W);
+    scale(tmp, -1.0);
+    // if (tmp[0] != 0.0) {
+    //     SD_PRINTF("TWxx = %17.9g\n", tmp[0]);
+    // }
+    accumulate(jaumann_stress_increment, tmp);
+
+    /* trial stress tensor */
+    double T_tr[9] = {0};
+    copy(T_tr, jaumann_stress_increment);
+    scale(T_tr, dt);
+    accumulate(T_tr, T);
+
+    voigt_from_sym_full(cauchy_stress, T_tr);
+}
+
+void FixRHEOStress::update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress,
+    const double *velocity_gradient, double density, double dt, int dim)
+{
+
+    // Assume velocity gradient is laid out like
+    //   Lxx, Lxy, Lxz,  Lyx, Lyy, Lyz,  Lzx, Lzy, Lzz
+    const double *L = velocity_gradient;
+
+
+    // Assume stress is laid out in voigt form like
+    //   Txx, Tyy, Tzz, Txy, Txz, Tyz
+    // then expand.
+    double T[9] = {0};
+    full_from_voigt(T, cauchy_stress);
+
+    double D[9] = {0};
+    double W[9] = {0};
+
+    skw_part(W, L, dim);
+    sym_part(D, L, dim);
+
+    /* trial elastic increment using jaumann rate */
+    double tmp[9] = {0};
+    identity(tmp);
+    scale(tmp, LAMBDA * trace(D));
+
+    double jaumann_stress_increment[9] = {0};
+    copy(jaumann_stress_increment, D);
+    scale(jaumann_stress_increment, 2.0 * G);
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, W, T);
+    accumulate(jaumann_stress_increment, tmp);
+
+    multiply(tmp, T, W);
+    scale(tmp, -1.0);
+    accumulate(jaumann_stress_increment, tmp);
+
+    /* trial stress tensor */
+    double T_tr[9] = {0};
+    copy(T_tr, jaumann_stress_increment);
+    scale(T_tr, dt);
+    accumulate(T_tr, T);
+
+    /* trial deviator values */
+    double T0_tr[9] = {0};
+    copy(T0_tr, T_tr);
+    deviator(T0_tr);
+
+    const double p_tr = -trace(T_tr) / 3.0;
+    // const double p_tr = (-trace(T) / 3.0) - dt * (K * trace(D));
+    // *rho_pressure = *rho_pressure - dt * (K * trace(D));
+    const double tau_tr = frobenius_norm(T0_tr) / sqrt(2.0);
+
+    const bool density_flag = (density <= RHO_CRITICAL);
+
+    double nup_tau = 0;
+    if (density_flag || p_tr <= COHESION) {
+        nup_tau = (tau_tr) / (G * dt);
+
+        // mark stress-free
+        for (size_t i = 0; i < 9; ++i) {
+          T[i] = 0.0;
+        }
+    } else if (p_tr > COHESION) {
+        const double mu_scaling = 1.0;
+        const double S0 = mu_scaling * MU_S * p_tr;
+        double tau_tau;
+        double scale_factor;
+        if (tau_tr <= S0) {
+            tau_tau = tau_tr;
+            scale_factor = 1.0;
+        } else {
+            const double S2 = mu_scaling * MU_2 * p_tr;
+            const double alpha = G * I_0 * dt * sqrt(p_tr / GRAINS_RHO) / GRAINS_D;
+            const double B = -(S2 + tau_tr + alpha);
+            const double H = S2 * tau_tr + S0 * alpha;
+            tau_tau = negative_root(1.0, B, H);
+            scale_factor = (tau_tau / tau_tr);
+        }
+
+        nup_tau = ((tau_tr - tau_tau) / G) / dt;
+
+        // Set stress according to T = (tau_tau / tau_tr) * T0_tr - pI.
+        identity(T);
+        scale(T, -p_tr);
+        // scale(T, -(*rho_pressure));
+        scale(T0_tr, scale_factor);
+        // *ptr_t0 = trace(T0_tr);
+        accumulate(T, T0_tr);
+        // *ptxxdev = T0_tr[Full3XX];
+    } else {
+        SD_PRINTF("p_tr: %.17g, density_flag: %d\n", p_tr, (int)density_flag);
+        error->one(FLERR,"Unhandled stress state detected.");
+        nup_tau = 0;
+    }
+
+    voigt_from_sym_full(cauchy_stress, T);
+    *pnup_tau = nup_tau;
+}
+
+static double heaviside(double t)
+{
+    if (t > 0) {
+        return 1.0;
+    } else {
+        return 0.0;
+    }
+}
+
+static double mu_from_voigt_stress(double *Tv)
+{
+    double T[9] = {0};
+    full_from_voigt(T, Tv);
+    const double p = -trace(T) / 3.0;
+    if (p <= 0) {
+        return 1337.0;
+    }
+
+    deviator(T);
+    const double tau = frobenius_norm(T) / sqrt(2.0);
+
+    return tau / p;
+}
+
+
+void FixRHEOStress::one_element_test(void)
+{
+    FILE *fp = fopen("/tmp/one_element_test.csv", "w+");
+    assert(fp != NULL);
+
+    const double t_final = 1.25;
+    const double dt = 1e-6;
+    const int dim = 2;
+    const size_t num_steps = t_final / dt;
+
+    double rho_pressure = 1;
+    double T[6] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
+    // double density = 1500.0001;
+    double density = RHO_CRITICAL + 1e-5;
+    double v = 1.0;
+    const double m = v * density;
+    double gammabar_p = 0;
+    for (size_t i = 0; i < num_steps; ++i) {
+        const double t = i * dt;
+        const double L[4] = {
+            0.1 * (((heaviside(t - 0.25) - heaviside(t - 0.5)) * (fabs(8.0*t - 3.0) - 1)) + ((heaviside(t - 0.75) - heaviside(t - 1.0)) * (1 - fabs(8.0*t - 7.0)))),
+            0.1 * 0.5,
+
+            0.1 * 0.0,
+            0.1 * (((heaviside(t - 0.25) - heaviside(t - 0.5)) * (fabs(8.0*t - 3.0) - 1)) + ((heaviside(t - 0.75) - heaviside(t - 1.0)) * (1 - fabs(8.0*t - 7.0)))),
+        };
+        // const double L[4] = { 0 , 1 , 0 , 0 };
+        // const double L[4] = { 1 , 0 , 0 , 1 };
+        double nup_tau = 0;
+        double tr_t0 = 0;
+        double txxdev = 0;
+        update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+        // update_one_material_point_stress_elastic(T, L, density, dt, dim);
+        gammabar_p += dt * nup_tau;
+
+        v = v * exp(dt * (L[0] + L[3]));
+        density = m / v;
+
+        fprintf(fp,
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+
+            "%17.17g\n",
+
+            t,
+            T[VoigtXX],
+            T[VoigtXY],
+            T[VoigtYY],
+            mu_from_voigt_stress(T),
+
+            density,
+            gammabar_p,
+            tr_t0,
+            rho_pressure,
+            txxdev,
+
+            T[VoigtZZ]
+        );
+    }
+
+    fclose(fp);
 }

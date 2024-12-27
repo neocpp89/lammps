@@ -21,7 +21,6 @@ FixStyle(rheo/stress,FixRHEOStress);
 #define LMP_FIX_RHEO_STRESS_H
 
 #include "fix.h"
-#include "compute_rheo_stress.h"
 
 namespace LAMMPS_NS {
 
@@ -36,15 +35,38 @@ class FixRHEOStress : public Fix {
   void end_of_step() override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
+  int pack_reverse_comm(int, int, double *) override;
+  void unpack_reverse_comm(int, int *, double *) override;
 
-  // Hack so I can set fix_rheo in this later
-  class Compute *stress_compute;
+  void update_one_material_point_stress_elastic(double *stress, const double *velocity_gradient, double density, double dt, int dim);
+  void update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);
+  // void update_one_material_point_stress(double *stress, const double *velocity_gradient, double density, double dt, int dim);
+  void one_element_test(void);
+
+  class FixRHEO *fix_rheo;
+  class FixStoreAtom *store_fix;
 
  private:
-  char *id_compute, *id_fix;
-  // class Compute *stress_compute;
-  class FixStoreAtom *store_fix;
-  std::string property_list_for_compute;
+  // double **stress;
+  char *id_fix;
+
+  void compute_peratom(void);
+
+  // Set by input file
+  double RHO_CRITICAL;
+  double E;
+  double NU;
+  double COHESION;
+  double GRAINS_D;
+  double GRAINS_RHO;
+  double MU_S;
+  double MU_2;
+  double I_0;
+
+  // Derived elastic parameters
+  double G;
+  double K;
+  double LAMBDA;
 };
 
 }    // namespace LAMMPS_NS

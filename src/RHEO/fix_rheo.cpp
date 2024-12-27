@@ -26,7 +26,6 @@
 #include "compute_rheo_rho_sum.h"
 #include "compute_rheo_surface.h"
 #include "fix_rheo_stress.h"
-#include "compute_rheo_stress.h"
 #include "compute_rheo_vshift.h"
 #include "domain.h"
 #include "error.h"
@@ -1736,8 +1735,7 @@ void FixRHEO::post_force(int /*vflag*/)
   auto fixes = modify->get_fix_by_style("rheo/stress");
   if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
   auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
-  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
-  double **stress = stress_compute->array_atom;
+  double **stress = fix_stress->array_atom;
 
   // hack for BCS
   // [sdunatunga] Tue 13 Feb 2024 07:53:19 AM PST
@@ -2037,8 +2035,7 @@ void FixRHEO::initial_integrate(int /*vflag*/)
   auto fixes = modify->get_fix_by_style("rheo/stress");
   if (fixes.size() == 0) error->all(FLERR, "Need to define fix rheo/stress to use pair rheo");
   auto *fix_stress = dynamic_cast<FixRHEOStress *>(fixes[0]);
-  auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
-  double **stress = stress_compute->array_atom;
+  double **stress = fix_stress->array_atom;
 
   // [sdunatunga] Tue 23 Apr 2024 12:10:17 AM PDT
   // post_force contents used to be here
