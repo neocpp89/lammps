@@ -1948,21 +1948,28 @@ void FixRHEO::post_force(int /*vflag*/)
 
                     const double vtrt = sqrt(magnitude_squared(&vtrtv));
 
-                    const double f_ct_max_wall = mu_wall * f_cn;
-                    const double f_ct_stick = vtrt / dtfm;
-                    const double f_ct = std::min(f_ct_stick, f_ct_max_wall);
+                    if (vtrt == 0.0) {
+                        // no relative tangential velocity, only normal forces
+                        f_c.x = f_cn * normal.x;
+                        f_c.y = f_cn * normal.y;
+                        f_c.z = f_cn * normal.z;
+                    } else {
+                        const double f_ct_max_wall = mu_wall * f_cn;
+                        const double f_ct_stick = vtrt / dtfm;
+                        const double f_ct = std::min(f_ct_stick, f_ct_max_wall);
 
-                    const vector_3d_t t_hat = {
-                        .x = vtrtv.x / vtrt,
-                        .y = vtrtv.y / vtrt,
-                        .z = vtrtv.z / vtrt,
-                    };
+                        const vector_3d_t t_hat = {
+                            .x = vtrtv.x / vtrt,
+                            .y = vtrtv.y / vtrt,
+                            .z = vtrtv.z / vtrt,
+                        };
 
-                    // f_cn is in the same direction as the normal, but f_ct is
-                    // opposite to the velocity (how we defined t_hat).
-                    f_c.x = f_cn * normal.x - f_ct * t_hat.x;
-                    f_c.y = f_cn * normal.y - f_ct * t_hat.y;
-                    f_c.z = f_cn * normal.z - f_ct * t_hat.z;
+                        // f_cn is in the same direction as the normal, but f_ct is
+                        // opposite to the velocity (how we defined t_hat).
+                        f_c.x = f_cn * normal.x - f_ct * t_hat.x;
+                        f_c.y = f_cn * normal.y - f_ct * t_hat.y;
+                        f_c.z = f_cn * normal.z - f_ct * t_hat.z;
+                    }
                 }
 
                 const double deltaf[] = {
