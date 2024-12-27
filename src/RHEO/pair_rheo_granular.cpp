@@ -254,18 +254,19 @@ void PairRHEOGranular::compute(int eflag, int vflag)
         // See Gray 2001 "SPH Elastic Dynamics"
         const double rhoisq = rhoi * rhoi;
         const double rhojsq = rhoj * rhoj;
+        const double ijmass = imass * jmass;
 
-        sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWij[0];
-        sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[1];
-        sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[2];
+        sdotdw[0] =  ijmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWij[0];
+        sdotdw[0] += ijmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[1];
+        sdotdw[0] += ijmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[2];
 
-        sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[0];
-        sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWij[1];
-        sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[2];
+        sdotdw[1] =  ijmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWij[0];
+        sdotdw[1] += ijmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWij[1];
+        sdotdw[1] += ijmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[2];
 
-        sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[0];
-        sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[1];
-        sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWij[2];
+        sdotdw[2] =  ijmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWij[0];
+        sdotdw[2] += ijmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWij[1];
+        sdotdw[2] += ijmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWij[2];
 
         if (atom->tag[i] == 1) {
             SD_PRINTF("divsigma j %d = [%17.9g %17.9g %17.9g]\n",
@@ -289,17 +290,17 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
         if (newton_pair || j < nlocal) {
 
-            sdotdw[0] =  imass * jmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWji[0];
-            sdotdw[0] += imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[1];
-            sdotdw[0] += imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[2];
+            sdotdw[0] =  ijmass * ((tixx / rhoisq) + (tjxx / rhojsq)) * dWji[0];
+            sdotdw[0] += ijmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[1];
+            sdotdw[0] += ijmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[2];
 
-            sdotdw[1] =  imass * jmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[0];
-            sdotdw[1] += imass * jmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWji[1];
-            sdotdw[1] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[2];
+            sdotdw[1] =  ijmass * ((tixy / rhoisq) + (tjxy / rhojsq)) * dWji[0];
+            sdotdw[1] += ijmass * ((tiyy / rhoisq) + (tjyy / rhojsq)) * dWji[1];
+            sdotdw[1] += ijmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[2];
 
-            sdotdw[2] =  imass * jmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[0];
-            sdotdw[2] += imass * jmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
-            sdotdw[2] += imass * jmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
+            sdotdw[2] =  ijmass * ((stress[i][4] / rhoisq) + (stress[j][4] / rhojsq)) * dWji[0];
+            sdotdw[2] += ijmass * ((stress[i][5] / rhoisq) + (stress[j][5] / rhojsq)) * dWji[1];
+            sdotdw[2] += ijmass * ((stress[i][2] / rhoisq) + (stress[j][2] / rhojsq)) * dWji[2];
 
             sdiv[j][0] += sdotdw[0];
             sdiv[j][1] += sdotdw[1];
@@ -319,7 +320,6 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
   // Add forces
   const tagint * const tag = atom->tag;
-  // double **v = atom->v;
   const double dt = update->dt;
   for (i = 0; i < atom->nlocal; i++) {
     if (atom->tag[i] == 1) {
@@ -328,37 +328,6 @@ void PairRHEOGranular::compute(int eflag, int vflag)
     }
     f[i][0] += sdiv[i][0];
     f[i][1] += sdiv[i][1];
-    f[i][2] += sdiv[i][2];
-
-    // if (x[i][1] > 8.0) {
-    //     f[i][1] += sdiv[i][1] - 9.81;
-    // } else {
-    //     f[i][1] += sdiv[i][1] + 9.81;
-    // }
-
-    // modify for boundary a bit
-#if 0
-    const double width = 0.2;
-    const double y_c = 2.1;
-    const double y = x[i][1];
-    const double s = ((y_c - y) / width);
-    if (y < y_c) {
-        v[i][0] *= s;
-        v[i][1] *= s;
-        v[i][2] *= s;
-    }
-    if (y < (y_c - width)) {
-        v[i][0] = 0;
-        v[i][1] = 0;
-        v[i][2] = 0;
-    }
-#endif
-
-    // if (1 <= tag[i] && tag[i] <= 200) {
-    //     // const double v_init = v[i][1];
-    //     // f[i][1] = -v_init / (mass[i] * dt);
-    //     v[i][1] = 0;
-    // }
     f[i][2] += sdiv[i][2];
 
     if (compute_interface) {
