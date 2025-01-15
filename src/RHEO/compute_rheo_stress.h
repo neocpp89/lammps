@@ -36,6 +36,7 @@ class ComputeRHEOStress : public Compute {
   int pack_reverse_comm(int, int, double *) override;
   void unpack_reverse_comm(int, int *, double *) override;
   double memory_usage() override;
+  void set_arrays(int) override;
 
   void update_one_material_point_stress_elastic(double *stress, const double *velocity_gradient, double density, double dt, int dim);
   void update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);

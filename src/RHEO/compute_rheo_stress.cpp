@@ -104,6 +104,7 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   peratom_flag = 1;
   comm_forward = NUM_STRESS_COMPONENTS;
   comm_reverse = NUM_STRESS_COMPONENTS;
+  create_attribute = 1;
 
   nmax_store = 0;
   grow_arrays(atom->nmax);
@@ -611,6 +612,13 @@ void ComputeRHEOStress::one_element_test(void)
 }
 
 /* ---------------------------------------------------------------------- */
+
+void ComputeRHEOStress::set_arrays(int i)
+{
+    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++) {
+      stress[i][a] = 0.0;
+    }
+}
 
 void ComputeRHEOStress::compute_peratom()
 {
