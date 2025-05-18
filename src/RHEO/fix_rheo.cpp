@@ -1326,6 +1326,10 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
         return;
     }
 
+    // Check what happens if we get rid of the check against facets, give
+    // normal to the cone instead.
+    // [sdunatunga] Thu 15 May 2025 11:21:56 PM PDT
+
     const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
     const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
     const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
@@ -1336,6 +1340,83 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
     const double wj = 1.0 - wjp;
     const double wk = 1.0 - wkp;
 
+#define FIXED_GEOMETRY 1
+
+#if defined(FIXED_GEOMETRY)
+    double cylinder_bc_strength = 0.0;
+    vector_3d_t cylinder_bc_normal = {0};
+    {
+        const double cylinder_radius = 1.15;
+        const vector_3d_t cylinder_axis = {
+            .x = 0.0,
+            .y = 0.0,
+            .z = 1.0,
+        };
+        const vector_3d_t cylinder_axis_origin_point {
+            .x = 0.0,
+            .y = 0.0,
+            .z = 0.0,
+        };
+
+        vector_3d_t v_xp_from_cyl = {0};
+        vsub(&v_xp_from_cyl, xp, &cylinder_axis_origin_point);
+        const double s = dot(&cylinder_axis, &v_xp_from_cyl);
+
+        const vector_3d_t p_along_axis = {
+            .x = s * cylinder_axis.x + cylinder_axis_origin_point.x,
+            .y = s * cylinder_axis.y + cylinder_axis_origin_point.y,
+            .z = s * cylinder_axis.z + cylinder_axis_origin_point.z,
+        };
+
+        vector_3d_t v_perpendicular_to_axis = {0};
+        vsub(&v_perpendicular_to_axis, xp, &p_along_axis);
+
+        const double perpendicular_distance_from_axis = sqrt(magnitude_squared(&v_perpendicular_to_axis));
+
+        if (0.0 < perpendicular_distance_from_axis &&
+            perpendicular_distance_from_axis <= cylinder_radius) {
+            // Inside the cylinder (the way we want).
+            cylinder_bc_normal.x = -v_perpendicular_to_axis.x / perpendicular_distance_from_axis;
+            cylinder_bc_normal.y = -v_perpendicular_to_axis.y / perpendicular_distance_from_axis;
+            cylinder_bc_normal.z = -v_perpendicular_to_axis.z / perpendicular_distance_from_axis;
+            const double r = (cylinder_radius - perpendicular_distance_from_axis) / loaded_facets[0].thickness;
+            cylinder_bc_strength = clamp_unity((1.0 - r) / 0.9);
+        } else {
+            cylinder_bc_strength = 0.0;
+        }
+    }
+
+    double cone_bc_strength = 0.0;
+    vector_3d_t cone_bc_normal = {0};
+    {
+        const double cone_scale_radius_from_axial_distance = 1.15 / 3.30;
+        const vector_3d_t cone_axis = {
+            .x = 0.0,
+            .y = 0.0,
+            .z = 1.0,
+        };
+        const vector_3d_t cone_axis_origin_point {
+            .x = 0.0,
+            .y = 0.0,
+            .z = -0.5,
+        };
+    }
+
+    // mix normals
+    {
+        if (cone_bc_strength == 0.0 && cylinder_bc_strength == 0.0) {
+            *sdf = 0.0;
+        } else {
+            normal->x = cone_bc_strength * cylinder_bc_normal.x + cylinder_bc_strength + cone_bc_normal.x;
+            normal->y = cone_bc_strength * cylinder_bc_normal.y + cylinder_bc_strength + cone_bc_normal.y;
+            normal->z = cone_bc_strength * cylinder_bc_normal.z + cylinder_bc_strength + cone_bc_normal.z;
+            normalize(normal);
+
+            // Use the closer one to set the stength.
+            *sdf = std::max(cylinder_bc_strength, cone_bc_strength);
+        }
+    }
+#else
     const uint64_t * const triangle_list =
         vgrid->cell_centered_triangle_lists[sdf_cell_index_from_spans(vgrid, i, j, k)];
 
@@ -1357,7 +1438,24 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
         free(distances);
         capacity_distances = num_triangles_in_cell_list;
         distances = static_cast<double *>(calloc(capacity_distances, sizeof(distances[0])));
+        printf("Increasing max distance list size to %zu\n", capacity_distances);
     }
+
+#if defined(DUPLICATION_CHECK)
+    // FIXME: Debug, this is a duplication check, will be slow.
+    size_t duplication_count = 0;
+    for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
+        for (size_t j = (i+1); j < num_triangles_in_cell_list; ++j) {
+            if (triangle_list[i + 1] == triangle_list[j + 1]) {
+                duplication_count++;
+            }
+        }
+    }
+
+    if (duplication_count != 0) {
+        printf("Duplication detected, unfiltered count is %zu\n", duplication_count);
+    }
+#endif
 
     // Now this just looks like the old style of problem but checking against a
     // smaller number of triangles.
@@ -1447,6 +1545,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
             *sticky = is_any_wall_sticky;
         }
     }
+#endif
 }
 
 static void bc_setup(void)
