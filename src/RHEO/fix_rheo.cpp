@@ -1316,6 +1316,109 @@ static void sdf_and_normal_from_vgrid_old(double *sdf, vector_3d_t *normal, bool
     normalize(normal);
 }
 
+typedef struct {
+    double radius_1;
+    double radius_2;
+    vector_3d_t origin_1;
+    vector_3d_t origin_2;
+    vector_3d_t axis;
+    double h;
+} cone_t;
+
+static cone_t my_cone = {
+    .radius_1 = 0.15,
+    .radius_2 = 1.15,
+    .origin_1 = {
+        .x = 0.0,
+        .y = 0.0,
+        .z = 0.0,
+    },
+    .origin_2 = {
+        .x = 0.0,
+        .y = 0.0,
+        .z = 2.8,
+    },
+};
+
+static void init_cone(cone_t * const cone)
+{
+    if (cone == NULL) {
+        return;
+    }
+
+    vsub(&cone->axis, &cone->origin_2, &cone->origin_1);
+    cone->h = sqrt(magnitude_squared(&cone->axis));
+    if (cone->h > 0.0) {
+        cone->axis.x /= cone->h;
+        cone->axis.y /= cone->h;
+        cone->axis.z /= cone->h;
+    } else {
+        cone->axis.x = 0.0;
+        cone->axis.y = 0.0;
+        cone->axis.z = 0.0;
+    }
+}
+
+static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const cone_t * const cone, double thickness, const vector_3d_t * const xp)
+{
+    if ((sdf == NULL) ||
+        (normal == NULL) ||
+        (cone == NULL)) {
+        return;
+    }
+
+    if (cone->h == 0.0) {
+        return;
+    }
+
+    *sdf = 0.0;
+    normal->x = 0.0;
+    normal->y = 0.0;
+    normal->z = 0.0;
+
+    
+
+    vector_3d_t p = {0};
+    vsub(&p, xp, &cone->origin_1);
+
+    // cone->axis is normalized
+    const double along_axis = dot(&p, &cone->axis);
+    if (along_axis >= 0.0) {
+        const double radius_at_projected_point = along_axis * (cone->radius_2 - cone->radius_1) / cone->h;
+        const double rpp2 = radius_at_projected_point * radius_at_projected_point;
+
+        vector_3d_t radial_vector = {0};
+        vector_3d_t p_axis = {
+            .x = along_axis * cone->axis.x,
+            .y = along_axis * cone->axis.y,
+            .z = along_axis * cone->axis.z,
+        };
+        vsub(&radial_vector, &p, &p_axis);
+        const double r2 = magnitude_squared(&radial_vector);
+
+        // On the interior of the cone, assume that radius 2 > radius 1 for the normal to point this way
+        if (r2 <= rpp2) {
+            const double r = sqrt(r2);
+            normal->x = (r * radius_at_projected_point * cone->axis.x) - along_axis * radial_vector.x;
+            normal->y = (r * radius_at_projected_point * cone->axis.y) - along_axis * radial_vector.y;
+            normal->z = (r * radius_at_projected_point * cone->axis.z) - along_axis * radial_vector.z;
+            const double n = sqrt(magnitude_squared(normal));
+            if (n > 0.0) {
+                normal->x /= n;
+                normal->y /= n;
+                normal->z /= n;
+                const double delta = radius_at_projected_point - r;
+                if (delta <= 0.0) {
+                    *sdf = 1.0;
+                } else {
+                    const double s = delta * (along_axis / hypot(along_axis, radius_at_projected_point)) / thickness;
+                    *sdf = clamp_unity((1.0 - s) / 0.9);
+                }
+            }
+        }
+    }
+}
+
 static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
 {
     if (
@@ -1389,17 +1492,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
     double cone_bc_strength = 0.0;
     vector_3d_t cone_bc_normal = {0};
     {
-        const double cone_scale_radius_from_axial_distance = 1.15 / 3.30;
-        const vector_3d_t cone_axis = {
-            .x = 0.0,
-            .y = 0.0,
-            .z = 1.0,
-        };
-        const vector_3d_t cone_axis_origin_point {
-            .x = 0.0,
-            .y = 0.0,
-            .z = -0.5,
-        };
+        boundary_strength_for_cone(&cone_bc_strength, &cone_bc_normal, &my_cone, loaded_facets[0].thickness, xp);
     }
 
     // mix normals
@@ -1550,6 +1643,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
 
 static void bc_setup(void)
 {
+    init_cone(&my_cone);
 /*
     for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
         sd_boundary_3d_t * const entry = &b3[bi];
