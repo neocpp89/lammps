@@ -1323,6 +1323,8 @@ typedef struct {
     vector_3d_t origin_2;
     vector_3d_t axis;
     double h;
+    double cos_theta;
+    double sin_theta;
 } cone_t;
 
 static cone_t my_cone = {
@@ -1352,11 +1354,30 @@ static void init_cone(cone_t * const cone)
         cone->axis.x /= cone->h;
         cone->axis.y /= cone->h;
         cone->axis.z /= cone->h;
+        const double delta_r = cone->radius_2 - cone->radius_1;
+        const double s = hypot(cone->h, delta_r);
+        cone->cos_theta = cone->h / s;
+        cone->sin_theta = delta_r / s;
     } else {
         cone->axis.x = 0.0;
         cone->axis.y = 0.0;
         cone->axis.z = 0.0;
+        cone->cos_theta = 0.0;
+        cone->sin_theta = 0.0;
     }
+}
+
+// See https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0811r2.html
+double stable_lerp(double a, double b, double t)
+{
+  // Exact, monotonic, bounded, determinate, and (for a=b=0) consistent:
+  if(a<=0 && b>=0 || a>=0 && b<=0) return t*b + (1.0-t)*a;
+
+  if(t==1.0) return b;                        // exact
+  // Exact at t=0, monotonic except near t=1,
+  // bounded, determinate, and consistent:
+  const double x = a + t*(b-a);
+  return t>1.0 == b>a ? std::max(b,x) : std::min(b,x);  // monotonic near t=1
 }
 
 static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const cone_t * const cone, double thickness, const vector_3d_t * const xp)
@@ -1376,15 +1397,14 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
     normal->y = 0.0;
     normal->z = 0.0;
 
-    
-
     vector_3d_t p = {0};
     vsub(&p, xp, &cone->origin_1);
 
     // cone->axis is normalized
     const double along_axis = dot(&p, &cone->axis);
     if (along_axis >= 0.0) {
-        const double radius_at_projected_point = along_axis * (cone->radius_2 - cone->radius_1) / cone->h;
+        const double xh =  along_axis / cone->h;
+        const double radius_at_projected_point = stable_lerp(cone->radius_1, cone->radius_2, xh);
         const double rpp2 = radius_at_projected_point * radius_at_projected_point;
 
         vector_3d_t radial_vector = {0};
@@ -1399,9 +1419,10 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
         // On the interior of the cone, assume that radius 2 > radius 1 for the normal to point this way
         if (r2 <= rpp2) {
             const double r = sqrt(r2);
-            normal->x = (r * radius_at_projected_point * cone->axis.x) - along_axis * radial_vector.x;
-            normal->y = (r * radius_at_projected_point * cone->axis.y) - along_axis * radial_vector.y;
-            normal->z = (r * radius_at_projected_point * cone->axis.z) - along_axis * radial_vector.z;
+            const double alpha = (cone->radius_2 - cone->radius_1) / cone->h;
+            normal->x = (r * alpha * cone->axis.x) - radial_vector.x;
+            normal->y = (r * alpha * cone->axis.y) - radial_vector.y;
+            normal->z = (r * alpha * cone->axis.z) - radial_vector.z;
             const double n = sqrt(magnitude_squared(normal));
             if (n > 0.0) {
                 normal->x /= n;
@@ -1411,7 +1432,7 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
                 if (delta <= 0.0) {
                     *sdf = 1.0;
                 } else {
-                    const double s = delta * (along_axis / hypot(along_axis, radius_at_projected_point)) / thickness;
+                    const double s = delta * cone->cos_theta / thickness;
                     *sdf = clamp_unity((1.0 - s) / 0.9);
                 }
             }
