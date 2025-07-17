@@ -1325,11 +1325,16 @@ typedef struct {
     double h;
     double cos_theta;
     double sin_theta;
+    double tan_theta;
 } cone_t;
 
 static cone_t my_cone = {
+    // .radius_1 = 0.15,
+    // .radius_2 = 1.20,
+    // .radius_1 = 1.15,
+    // .radius_2 = 4.20,
     .radius_1 = 0.15,
-    .radius_2 = 1.15,
+    .radius_2 = 3.20,
     .origin_1 = {
         .x = 0.0,
         .y = 0.0,
@@ -1338,7 +1343,8 @@ static cone_t my_cone = {
     .origin_2 = {
         .x = 0.0,
         .y = 0.0,
-        .z = 2.8,
+        // .z = 2.8,
+        .z = 6.8,
     },
 };
 
@@ -1358,6 +1364,7 @@ static void init_cone(cone_t * const cone)
         const double s = hypot(cone->h, delta_r);
         cone->cos_theta = cone->h / s;
         cone->sin_theta = delta_r / s;
+        cone->tan_theta = delta_r / cone->h;
     } else {
         cone->axis.x = 0.0;
         cone->axis.y = 0.0;
@@ -1419,15 +1426,28 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
         // On the interior of the cone, assume that radius 2 > radius 1 for the normal to point this way
         if (r2 <= rpp2) {
             const double r = sqrt(r2);
-            const double alpha = (cone->radius_2 - cone->radius_1) / cone->h;
-            normal->x = (r * alpha * cone->axis.x) - radial_vector.x;
-            normal->y = (r * alpha * cone->axis.y) - radial_vector.y;
-            normal->z = (r * alpha * cone->axis.z) - radial_vector.z;
-            const double n = sqrt(magnitude_squared(normal));
-            if (n > 0.0) {
-                normal->x /= n;
-                normal->y /= n;
-                normal->z /= n;
+            // const double alpha = (cone->radius_2 - cone->radius_1) / cone->h;
+            // normal->x = (r * alpha * cone->axis.x) - radial_vector.x;
+            // normal->y = (r * alpha * cone->axis.y) - radial_vector.y;
+            // normal->z = (r * alpha * cone->axis.z) - radial_vector.z;
+
+            // const double z = r * cone->tan_theta;
+            // normal->x = (z * cone->axis.x) - radial_vector.x;
+            // normal->y = (z * cone->axis.y) - radial_vector.y;
+            // normal->z = (z * cone->axis.z) - radial_vector.z;
+            const double xy = hypot(xp->x, xp->y);
+            normal->x = -cone->cos_theta * xp->x / xy;
+            normal->y = -cone->cos_theta * xp->y / xy;
+            normal->z = cone->sin_theta;
+            // printf("cos_theta = %.9f\n", cone->cos_theta);
+            // printf("normal->z = %.9f\n", normal->z);
+            const double n2 = 1.0;
+            // const double n2 = magnitude_squared(normal);
+            if (n2 > 0.0) {
+                // const double n = sqrt(n2);
+                // normal->x /= n;
+                // normal->y /= n;
+                // normal->z /= n;
                 const double delta = radius_at_projected_point - r;
                 if (delta <= 0.0) {
                     *sdf = 1.0;
@@ -1442,33 +1462,12 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
 
 static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
 {
-    if (
-        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
-        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
-        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
-    ) {
-        return;
-    }
-
-    // Check what happens if we get rid of the check against facets, give
-    // normal to the cone instead.
-    // [sdunatunga] Thu 15 May 2025 11:21:56 PM PDT
-
-    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
-    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
-    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
-    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
-    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
-    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
-    const double wi = 1.0 - wip;
-    const double wj = 1.0 - wjp;
-    const double wk = 1.0 - wkp;
-
 #define FIXED_GEOMETRY 1
-
 #if defined(FIXED_GEOMETRY)
     double cylinder_bc_strength = 0.0;
     vector_3d_t cylinder_bc_normal = {0};
+#if 0
+    if (0)
     {
         const double cylinder_radius = 1.15;
         const vector_3d_t cylinder_axis = {
@@ -1509,6 +1508,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
             cylinder_bc_strength = 0.0;
         }
     }
+#endif
 
     double cone_bc_strength = 0.0;
     vector_3d_t cone_bc_normal = {0};
@@ -1521,9 +1521,9 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
         if (cone_bc_strength == 0.0 && cylinder_bc_strength == 0.0) {
             *sdf = 0.0;
         } else {
-            normal->x = cone_bc_strength * cylinder_bc_normal.x + cylinder_bc_strength + cone_bc_normal.x;
-            normal->y = cone_bc_strength * cylinder_bc_normal.y + cylinder_bc_strength + cone_bc_normal.y;
-            normal->z = cone_bc_strength * cylinder_bc_normal.z + cylinder_bc_strength + cone_bc_normal.z;
+            normal->x = cylinder_bc_strength * cylinder_bc_normal.x + cone_bc_strength * cone_bc_normal.x;
+            normal->y = cylinder_bc_strength * cylinder_bc_normal.y + cone_bc_strength * cone_bc_normal.y;
+            normal->z = cylinder_bc_strength * cylinder_bc_normal.z + cone_bc_strength * cone_bc_normal.z;
             normalize(normal);
 
             // Use the closer one to set the stength.
@@ -1531,6 +1531,24 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
         }
     }
 #else
+    if (
+        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
+        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
+        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
+    ) {
+        return;
+    }
+
+    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
+    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
+    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
+    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
+    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
+    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
+    const double wi = 1.0 - wip;
+    const double wj = 1.0 - wjp;
+    const double wk = 1.0 - wkp;
+
     const uint64_t * const triangle_list =
         vgrid->cell_centered_triangle_lists[sdf_cell_index_from_spans(vgrid, i, j, k)];
 
@@ -1999,6 +2017,14 @@ void FixRHEO::post_force(int /*vflag*/)
         //     }
         // }
 
+        // [sdunatunga] Thu 03 Jul 2025 11:51:24 PM PDT
+        // Debug check for first contact step.
+        // update->ntimestep = 13320[Thread 0x7ffff0dcb640 (LWP 2811973) exited]
+        // if (s != 0.0) {
+        //     printf("update->ntimestep = %zu", (size_t)update->ntimestep);
+        //     exit(0);
+        // }
+
         stress[i][12] = s;
         stress[i][13] = xp.x;
         stress[i][14] = xp.y;
@@ -2013,6 +2039,9 @@ void FixRHEO::post_force(int /*vflag*/)
         stress[i][23] = f[i][2];
         stress[i][24] = fdir.x;
         stress[i][25] = fdir.y;
+        // if (fdir.z != 0.0) {
+        //     printf("normal->z = %.9f\n", fdir.z);
+        // }
         stress[i][26] = fdir.z;
         if (s != 0.0) {
             // We can slide along all walls in this contact, so we need a
