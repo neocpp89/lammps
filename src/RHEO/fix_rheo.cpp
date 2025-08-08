@@ -1466,8 +1466,6 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
 #if defined(FIXED_GEOMETRY)
     double cylinder_bc_strength = 0.0;
     vector_3d_t cylinder_bc_normal = {0};
-#if 0
-    if (0)
     {
         const double cylinder_radius = 1.15;
         const vector_3d_t cylinder_axis = {
@@ -1508,7 +1506,6 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
             cylinder_bc_strength = 0.0;
         }
     }
-#endif
 
     double cone_bc_strength = 0.0;
     vector_3d_t cone_bc_normal = {0};
