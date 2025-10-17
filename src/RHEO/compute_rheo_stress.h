@@ -39,7 +39,7 @@ class ComputeRHEOStress : public Compute {
   void set_arrays(int) override;
 
   void update_one_material_point_stress_elastic(double *stress, const double *velocity_gradient, double density, double dt, int dim);
-  void update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);
+  void update_one_material_point_stress(double *pphi_d, double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);
   // void update_one_material_point_stress(double *stress, const double *velocity_gradient, double density, double dt, int dim);
   void one_element_test(void);
 
@@ -63,6 +63,8 @@ class ComputeRHEOStress : public Compute {
   double MU_S;
   double MU_2;
   double I_0;
+  double PHI_C;
+  double PHI_MIN;
 
   // Derived elastic parameters
   double G;

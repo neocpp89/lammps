@@ -73,6 +73,8 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
     { .required = true, .name = "mu_s", .value = &MU_S, },
     { .required = true, .name = "mu_2", .value = &MU_2, },
     { .required = true, .name = "I_0", .value = &I_0, },
+    { .required = true, .name = "phi_c", .value = &PHI_C, },
+    { .required = true, .name = "phi_min", .value = &PHI_MIN, },
   };
 
   for (size_t iarg = 3; iarg < narg; ++iarg) {
@@ -123,7 +125,7 @@ ComputeRHEOStress::~ComputeRHEOStress()
 
 /* ---------------------------------------------------------------------- */
 
-#define DUMP_PROPERTY(x) SD_PRINTF("%s = %.17g\n", #x, x)
+#define DUMP_PROPERTY(x) printf("%s = %.17g\n", #x, x)
 
 void ComputeRHEOStress::init()
 {
@@ -153,8 +155,18 @@ void ComputeRHEOStress::init()
   DUMP_PROPERTY(G);
   DUMP_PROPERTY(K);
   DUMP_PROPERTY(LAMBDA);
+  DUMP_PROPERTY(PHI_C);
+  DUMP_PROPERTY(PHI_MIN);
 
-  // one_element_test();
+  // set phi_d initial to phi_c -- should act like isochoric model (without
+  // beta term).
+  for (int i = 0; i < nmax_store; i++)
+  {
+      stress[i][27] = PHI_MIN;
+  }
+
+
+  one_element_test();
 }
 
 /* ---------------------------------------------------------------------- */
@@ -339,6 +351,13 @@ static void multiply(double *C, const double *A, const double *B)
   }
 }
 
+static void make_stress_free(double * const T)
+{
+    for (size_t i = 0; i < 9; ++i) {
+        T[i] = 0.0;
+    }
+}
+
 // Material parameters (to be set by fix arguments..).
 // const static double RHO_CRITICAL = 1.0;
 // const static double E = 1e4;
@@ -414,7 +433,7 @@ void ComputeRHEOStress::update_one_material_point_stress_elastic(double *cauchy_
     voigt_from_sym_full(cauchy_stress, T_tr);
 }
 
-void ComputeRHEOStress::update_one_material_point_stress(double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress,
+void ComputeRHEOStress::update_one_material_point_stress(double *pphi_d, double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress,
     const double *velocity_gradient, double density, double dt, int dim)
 {
 
@@ -468,51 +487,184 @@ void ComputeRHEOStress::update_one_material_point_stress(double *ptxxdev, double
     // *rho_pressure = *rho_pressure - dt * (K * trace(D));
     const double tau_tr = frobenius_norm(T0_tr) / sqrt(2.0);
 
-    const bool density_flag = (density <= RHO_CRITICAL);
+    // density is already normalized to some degree, and assume we started at phi_min
+    const double phi = PHI_MIN * density;
+    const double phi_d_t = *pphi_d;
+    const double XI = 2.0;
+    // const double XI = 0.0;
+    const double h_t = XI * (phi_d_t - PHI_C);
+    double phi_d_tau = phi_d_t;
+    double which_branch = 0;
 
     double nup_tau = 0;
-    if (density_flag || p_tr <= COHESION) {
-        nup_tau = (tau_tr) / (G * dt);
-
+    if (phi < PHI_MIN) {
+        phi_d_tau = PHI_MIN;
         // mark stress-free
-        for (size_t i = 0; i < 9; ++i) {
-          T[i] = 0.0;
-        }
-    } else if (p_tr > COHESION) {
+        make_stress_free(T);
+        which_branch = 0;
+    } else if (phi < phi_d_t) {
+        // Keep phi_d the same, but material is still stress-free
+        phi_d_tau = phi_d_t;
+        make_stress_free(T);
+        which_branch = 1;
+    } else if (phi >= phi_d_t) {
         const double mu_scaling = 1.0;
-        const double S0 = mu_scaling * MU_S * p_tr;
-        double tau_tau;
-        double scale_factor;
+        const double S0 = (mu_scaling * (MU_S + h_t) * p_tr);
+        // in this formulation, beta = h_t / 3.0
+        double tau_tau = 0.0;
+        double scale_factor = 0.0;
+        // const double p_star = p_tr - h_t * tau_tr;
+        const double alpha = K * h_t / G;
+        const double p_star = p_tr + alpha * tau_tr;
         if (tau_tr <= S0) {
+            phi_d_tau = phi_d_t;
             tau_tau = tau_tr;
             scale_factor = 1.0;
-        } else {
-            const double S2 = mu_scaling * MU_2 * p_tr;
+
+            // accept trial
+            copy(T, T_tr);
+
+            which_branch = 2;
+        } else if (p_star > 0.0) {
+#if 0
+            const double S2 = mu_scaling * (MU_2 + h_t) * p_tr;
             const double alpha = G * I_0 * dt * sqrt(p_tr / GRAINS_RHO) / GRAINS_D;
             const double B = -(S2 + tau_tr + alpha);
             const double H = S2 * tau_tr + S0 * alpha;
             tau_tau = negative_root(1.0, B, H);
+
             scale_factor = (tau_tau / tau_tr);
+            const double gammabar_dot_p = ((tau_tr - tau_tau) / G) / dt;
+            phi_d_tau = phi_d_t - dt * (h_t * phi_d_t * gammabar_dot_p);
+
+            nup_tau = ((tau_tr - tau_tau) / G) / dt;
+
+            // (tau_tr - tau_tau) / (p_tr - p_tau) = 1 / (3 * beta) = 1 / h_t
+            const double p_tau = p_tr - h_t * (tau_tr - tau_tau);
+#endif
+
+            double p_tau = 0.0;
+
+            // Need to fallback to old method if h_t is identically zero
+            if (h_t == 0.0) {
+                const double S2 = mu_scaling * (MU_2 + h_t) * p_tr;
+                const double alpha = G * I_0 * dt * sqrt(p_tr / GRAINS_RHO) / GRAINS_D;
+                const double B = -(S2 + tau_tr + alpha);
+                const double H = S2 * tau_tr + S0 * alpha;
+                tau_tau = negative_root(1.0, B, H);
+                which_branch = 8;
+            } else {
+#if 0
+                const double alpha_star = (1.0 - h_t * (MU_S + h_t));
+                DUMP_PROPERTY(p_star);
+                DUMP_PROPERTY(alpha_star);
+                double p_iterate = p_star / alpha_star;
+                DUMP_PROPERTY(p_iterate);
+                for (size_t i = 0; i < 100; ++i) {
+                    const double gamma_bar_p_dot = (p_tr - p_iterate) / (h_t * G * dt);
+                    const double tau_iterate = tau_tr - (p_tr - p_iterate) / h_t;
+                    const double I_0_over_I_iterate = (I_0 * sqrt(p_iterate / GRAINS_RHO) / GRAINS_D) / gamma_bar_p_dot;
+                    const double mu_iterate = MU_S + (MU_2 - MU_S) / (I_0_over_I_iterate + 1.0);
+                    DUMP_PROPERTY(tau_iterate);
+                    DUMP_PROPERTY(mu_iterate);
+                    p_iterate = tau_iterate / mu_iterate;
+                }
+                DUMP_PROPERTY(p_iterate);
+                tau_tau = tau_tr - (p_tr - p_iterate) / h_t;
+                DUMP_PROPERTY(tau_tau);
+#endif
+                DUMP_PROPERTY(p_star);
+                double p_iterate = (alpha * tau_tr + p_tr) / (1.0 + (MU_S + h_t) * alpha);
+                DUMP_PROPERTY(p_iterate);
+                // for (size_t i = 0; i < 100; ++i) {
+                //     const double gamma_bar_p_dot = (p_tr - p_iterate) / (h_t * G * dt);
+                //     const double tau_iterate = tau_tr - (p_tr - p_iterate) / h_t;
+                //     const double I_0_over_I_iterate = (I_0 * sqrt(p_iterate / GRAINS_RHO) / GRAINS_D) / gamma_bar_p_dot;
+                //     const double mu_iterate = MU_S + (MU_2 - MU_S) / (I_0_over_I_iterate + 1.0);
+                //     DUMP_PROPERTY(tau_iterate);
+                //     DUMP_PROPERTY(mu_iterate);
+                //     p_iterate = tau_iterate / mu_iterate;
+                //     DUMP_PROPERTY(p_iterate);
+                // }
+                DUMP_PROPERTY(p_iterate);
+                tau_tau = (MU_S + h_t) * p_iterate;
+                DUMP_PROPERTY(tau_tau);
+                DUMP_PROPERTY(alpha);
+                // static int tmp = 0;
+                // if (tmp < 20) {
+                //     tmp++;
+                // } else {
+                //     error->all(FLERR, "tmp.");
+                // }
+                p_tau = p_iterate;
+            }
+
+            if (tau_tau < 0.0) {
+                error->all(FLERR, "Equivalent shear stress emitted by solve was negative.");
+            }
+
+            if (std::isnan(tau_tau)) {
+                error->all(FLERR, "NAN equivalent shear stress emitted by solve.");
+            }
+
+            // const double p_tau = p_tr - h_t * (tau_tr - tau_tau);
+
+            if (p_tau < 0.0) {
+                error->all(FLERR, "Pressure emitted by solve was negative.");
+            }
+
+            // if (std::isnan(tau_tau)) {
+            //     error->all(FLERR, "NAN emitted by solve.");
+            // }
+            // const double p_tau = p_tr - h_t * (tau_tr - tau_tau);
+
+            scale_factor = tau_tau / tau_tr;
+
+            // Set stress according to T = (tau_tau / tau_tr) * T0_tr - p_tau * I.
+            identity(T);
+            scale(T, -p_tau);
+            // scale(T, -(*rho_pressure));
+            scale(T0_tr, scale_factor);
+            // *ptr_t0 = trace(T0_tr);
+            accumulate(T, T0_tr);
+            // *ptxxdev = T0_tr[Full3XX];
+
+            const double gammabar_dot_p = ((tau_tr - tau_tau) / G) / dt;
+            phi_d_tau = phi_d_t - dt * (h_t * phi_d_t * gammabar_dot_p);
+
+            if (phi_d_tau < PHI_MIN) {
+                phi_d_tau = PHI_MIN;
+            }
+
+            which_branch = 3;
+        } else {
+            // const double tau_cr = tau_tr - p_tr / h_t;
+            const double indicator = h_t * tau_tr - p_tr;
+            if (indicator < 0.0) {
+                // Keep phi_d the same, but material is still stress-free
+                phi_d_tau = phi_d_t;
+                make_stress_free(T);
+                which_branch = 4;
+            } else {
+                // TODO: project down to tau_cr, then drop to cone apex, but for now just drop to cone apex
+                // Keep phi_d the same, but material is still stress-free
+                phi_d_tau = phi_d_t;
+                make_stress_free(T);
+                which_branch = 5;
+            }
         }
 
-        nup_tau = ((tau_tr - tau_tau) / G) / dt;
-
-        // Set stress according to T = (tau_tau / tau_tr) * T0_tr - pI.
-        identity(T);
-        scale(T, -p_tr);
-        // scale(T, -(*rho_pressure));
-        scale(T0_tr, scale_factor);
-        // *ptr_t0 = trace(T0_tr);
-        accumulate(T, T0_tr);
-        // *ptxxdev = T0_tr[Full3XX];
     } else {
-        SD_PRINTF("p_tr: %.17g, density_flag: %d\n", p_tr, (int)density_flag);
+        printf("phi_d_t: %.17g, p_tr: %.17g \n", phi_d_t, p_tr);
         error->all(FLERR,"Unhandled stress state detected.");
         nup_tau = 0;
     }
 
     voigt_from_sym_full(cauchy_stress, T);
     *pnup_tau = nup_tau;
+    *pphi_d = phi_d_tau;
+    // hack
+    cauchy_stress[28] = which_branch;
 }
 
 static double heaviside(double t)
@@ -550,12 +702,15 @@ void ComputeRHEOStress::one_element_test(void)
     const size_t num_steps = t_final / dt;
 
     double rho_pressure = 1;
-    double T[6] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
+    // double T[6] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
+    double T[32] = {-rho_pressure, -rho_pressure, -rho_pressure, 0, 0, 0};
     // double density = 1500.0001;
-    double density = RHO_CRITICAL + 1e-5;
+    // double density = RHO_CRITICAL + 1e-5;
+    double density = 1.6;
     double v = 1.0;
     const double m = v * density;
     double gammabar_p = 0;
+    double phi_d = 0.4;
     for (size_t i = 0; i < num_steps; ++i) {
         const double t = i * dt;
         const double L[4] = {
@@ -565,19 +720,35 @@ void ComputeRHEOStress::one_element_test(void)
             0.1 * 0.0,
             0.1 * (((heaviside(t - 0.25) - heaviside(t - 0.5)) * (fabs(8.0*t - 3.0) - 1)) + ((heaviside(t - 0.75) - heaviside(t - 1.0)) * (1 - fabs(8.0*t - 7.0)))),
         };
+        // const double L[4] = { 0 , 0 , 0 , 0 };
         // const double L[4] = { 0 , 1 , 0 , 0 };
         // const double L[4] = { 1 , 0 , 0 , 1 };
         double nup_tau = 0;
         double tr_t0 = 0;
         double txxdev = 0;
-        update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+        update_one_material_point_stress(&phi_d, &txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
         // update_one_material_point_stress_elastic(T, L, density, dt, dim);
         gammabar_p += dt * nup_tau;
+
+
+        /* trial deviator values */
+        double Tt[9] = {0};
+        full_from_voigt(Tt, T);
+        double T0_tau[9] = {0};
+        copy(T0_tau, Tt);
+        deviator(T0_tau);
+
+        const double p_tau = -trace(Tt) / 3.0;
+        const double tau_tau = frobenius_norm(T0_tau) / sqrt(2.0);
 
         v = v * exp(dt * (L[0] + L[3]));
         density = m / v;
 
         fprintf(fp,
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
+            "%17.17g,"
             "%17.17g,"
             "%17.17g,"
             "%17.17g,"
@@ -593,6 +764,10 @@ void ComputeRHEOStress::one_element_test(void)
             "%17.17g\n",
 
             t,
+            phi_d,
+            T[28],
+            tau_tau,
+            p_tau,
             T[VoigtXX],
             T[VoigtXY],
             T[VoigtYY],
@@ -661,7 +836,8 @@ void ComputeRHEOStress::compute_peratom()
     double nup_tau = 0;
     double tr_t0 = 0;
     double txxdev = 0;
-    update_one_material_point_stress(&txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
+    double *pphi_d = &stress[i][27];
+    update_one_material_point_stress(pphi_d, &txxdev, &rho_pressure, &tr_t0, &nup_tau, T, L, density, dt, dim);
     // update_one_material_point_stress_elastic(T, L, density, dt, dim);
 
     if (atom->tag[i] == 1) {
