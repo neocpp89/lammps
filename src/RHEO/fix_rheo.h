@@ -74,6 +74,7 @@ class FixRHEO : public Fix {
   // void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp, double radius);
   std::vector<std::string> boundary_region_ids;
   std::vector<class Region *> boundary_regions;
+  std::vector<int> nc;
 };
 
 namespace RHEO_NS {

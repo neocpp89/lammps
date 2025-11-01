@@ -144,7 +144,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), rho0(nullptr), csq(nullptr), compute_grad(nullptr),
     compute_kernel(nullptr), compute_interface(nullptr), compute_surface(nullptr),
     compute_rhosum(nullptr), compute_vshift(nullptr),
-    boundary_region_ids(), boundary_regions()
+    boundary_region_ids(), boundary_regions(), nc()
 {
   time_integrate = 1;
 
@@ -341,6 +341,7 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
             auto boundary_region = domain->get_region_by_id(boundary_region_id);
             if (!boundary_region) error->all(FLERR, "Region {} for fix rheo does not exist", boundary_region_id);
             boundary_regions.push_back(boundary_region);
+            nc.push_back(0);
             // nregion = region->nregion;
         }
     }
@@ -1481,7 +1482,8 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
 }
 
 static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp, double radius,
-        const std::vector<Region *> &region_list
+        const std::vector<Region *> &region_list,
+        std::vector<int> &nc
     // Region *boundary_region
 )
 {
@@ -1560,20 +1562,21 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
         0.0,
     };
 
-    for (auto & region : region_list) {
-    // if (boundary_region != nullptr) {
-        // auto region = boundary_region;
-        // printf("region: %p\n", region);
+
+    // Do first to get all contacts in all regions.
+    for (size_t ii = 0; ii < region_list.size(); ++ii) {
+        auto region = region_list[ii];
         if (region->match(xp->x, xp->y, xp->z)) {
+            nc[ii] = region->surface(xp->x, xp->y, xp->z, radius);
+        } else {
+            nc[ii] = 0;
+        }
+    }
 
-        const int nc = region->surface(xp->x, xp->y, xp->z, radius);
-
-        // printf("matching region %s (%g, %g, %g)\n", region->id, xp->x, xp->y, xp->z);
-
-        if (nc > 0) {
-            // printf("matching region %s (%g, %g, %g), nc = %d\n", region->id, xp->x, xp->y, xp->z, nc);
-            for (size_t i = 0; i < nc; ++i) {
-                // printf("i = %zu, r = %g\n", i, region->contact[i].r);
+    for (size_t ii = 0; ii < region_list.size(); ++ii) {
+        auto region = region_list[ii];
+        if (nc[ii] > 0) {
+            for (size_t i = 0; i < nc[ii]; ++i) {
                 if (region->contact[i].r > 0.0) {
                     double my_strength = 1.0;
                     const vector_3d_t my_normal = {
@@ -1582,14 +1585,18 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
                         .z = region->contact[i].delz / region->contact[i].r,
                     };
 
-                    for (size_t j = 0; j < nc; ++j) {
-                        // Not the current wall we're considering (chain rule), and
-                        // product of all other walls that are within range.
-                        if ((j != i) && (region->contact[j].r < loaded_facets[0].thickness)) {
-                            // distances should all be positive by this point, so fabs is
-                            // unnecessary...
-                            // pi_d *= fabs(distances[j]);
-                            my_strength *= region->contact[j].r;
+                    // Now we need to go over all other contacts, including in
+                    // other regions. 
+                    for (size_t jj = 0; jj < region_list.size(); ++jj) {
+                        auto other_region = region_list[jj];
+                        for (size_t j = 0; j < nc[jj]; ++j) {
+                            // Not the current wall we're considering (chain rule), and
+                            // product of all other walls that are within range.
+                            const bool is_current_contact = (ii == jj) && (i == j);
+
+                            if (!is_current_contact && (other_region->contact[j].r < loaded_facets[0].thickness)) {
+                                my_strength *= other_region->contact[j].r;
+                            }
                         }
                     }
 
@@ -1602,24 +1609,12 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
                     // printf("i = %zu, s = %g, nhat = (%g, %g, %g)\n", i, s, my_normal.x, my_normal.y, my_normal.z);
                     *sdf = std::max(s, *sdf);
                 }
-
             }
-
         }
+    }
 
-        if (*sdf > 0.0) {
-            normalize(normal);
-        }
-
-        // Do the thing, something like this in fix_wall_gran_region.cpp:192
-        // for (i = 0; i < nlocal; i++) {
-        //   if (!(mask[i] & groupbit)) continue;
-        //   if (! region->match(x[i][0], x[i][1], x[i][2])) continue;
-
-        //   nc = region->surface(x[i][0], x[i][1], x[i][2], radius[i] + model->pulloff_distance(radius[i], 0.0));
-        //   if (nc > tmax) error->one(FLERR, "Too many wallgran/region contacts for one particle");
-
-        }
+    if (*sdf > 0.0) {
+        normalize(normal);
     }
 
 #else
@@ -2117,7 +2112,7 @@ void FixRHEO::post_force(int /*vflag*/)
         size_t facet_index = 0;
         // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, atom->radius[i], domain->get_region_list());
         // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_region);
-        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_regions);
+        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_regions, nc);
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
