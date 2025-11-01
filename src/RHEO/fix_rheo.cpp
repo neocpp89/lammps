@@ -33,6 +33,7 @@
 #include "force.h"
 #include "memory.h"
 #include "modify.h"
+#include "region.h"
 #include "update.h"
 #include "utils.h"
 
@@ -142,7 +143,8 @@ static void make_stl_voxel_grid(stl_voxel_grid_t *vgrid, const stl_facet_t * con
 FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
     Fix(lmp, narg, arg), rho0(nullptr), csq(nullptr), compute_grad(nullptr),
     compute_kernel(nullptr), compute_interface(nullptr), compute_surface(nullptr),
-    compute_rhosum(nullptr), compute_vshift(nullptr)
+    compute_rhosum(nullptr), compute_vshift(nullptr),
+    boundary_region_ids(), boundary_regions()
 {
   time_integrate = 1;
 
@@ -280,6 +282,13 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         csq[i] *= csq[i];
       }
       iarg += n;
+    } else if (strcmp(arg[iarg],"boundary/region") == 0) {
+      if (narg < iarg+2) error->all(FLERR,"Illegal region command");
+      const int num_boundaries = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
+      for (i = 1; i <= num_boundaries; ++i) {
+          boundary_region_ids.push_back(utils::strdup(arg[iarg+1+i]));
+      }
+      iarg += (1 + num_boundaries);
     } else {
       error->all(FLERR, "Illegal fix rheo command: {}", arg[iarg]);
     }
@@ -323,6 +332,17 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
         printf("facet %zu:\n", num_loaded_facets);
         print_facet(&loaded_facets[num_loaded_facets]);
         num_loaded_facets++;
+    }
+
+
+    for (auto boundary_region_id : boundary_region_ids) {
+        if (boundary_region_id.length() > 0)
+        {
+            auto boundary_region = domain->get_region_by_id(boundary_region_id);
+            if (!boundary_region) error->all(FLERR, "Region {} for fix rheo does not exist", boundary_region_id);
+            boundary_regions.push_back(boundary_region);
+            // nregion = region->nregion;
+        }
     }
 
     free(facets);
@@ -1460,9 +1480,13 @@ static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const c
     }
 }
 
-static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
+static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp, double radius,
+        const std::vector<Region *> &region_list
+    // Region *boundary_region
+)
 {
-#define FIXED_GEOMETRY 1
+// #define FIXED_GEOMETRY 1
+#define USE_LAMMPS_REGIONS 1
 #if defined(FIXED_GEOMETRY)
     double cylinder_bc_strength = 0.0;
     vector_3d_t cylinder_bc_normal = {0};
@@ -1527,7 +1551,79 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
             *sdf = std::max(cylinder_bc_strength, cone_bc_strength);
         }
     }
+#error "using fixed geom"
+#elif defined(USE_LAMMPS_REGIONS)
+    *sdf = 0.0;
+    *normal = (vector_3d_t) {
+        0.0,
+        0.0,
+        0.0,
+    };
+
+    for (auto & region : region_list) {
+    // if (boundary_region != nullptr) {
+        // auto region = boundary_region;
+        // printf("region: %p\n", region);
+        if (region->match(xp->x, xp->y, xp->z)) {
+
+        const int nc = region->surface(xp->x, xp->y, xp->z, radius);
+
+        // printf("matching region %s (%g, %g, %g)\n", region->id, xp->x, xp->y, xp->z);
+
+        if (nc > 0) {
+            // printf("matching region %s (%g, %g, %g), nc = %d\n", region->id, xp->x, xp->y, xp->z, nc);
+            for (size_t i = 0; i < nc; ++i) {
+                // printf("i = %zu, r = %g\n", i, region->contact[i].r);
+                if (region->contact[i].r > 0.0) {
+                    double my_strength = 1.0;
+                    const vector_3d_t my_normal = {
+                        .x = region->contact[i].delx / region->contact[i].r,
+                        .y = region->contact[i].dely / region->contact[i].r,
+                        .z = region->contact[i].delz / region->contact[i].r,
+                    };
+
+                    for (size_t j = 0; j < nc; ++j) {
+                        // Not the current wall we're considering (chain rule), and
+                        // product of all other walls that are within range.
+                        if ((j != i) && (region->contact[j].r < loaded_facets[0].thickness)) {
+                            // distances should all be positive by this point, so fabs is
+                            // unnecessary...
+                            // pi_d *= fabs(distances[j]);
+                            my_strength *= region->contact[j].r;
+                        }
+                    }
+
+                    normal->x += my_strength * my_normal.x;
+                    normal->y += my_strength * my_normal.y;
+                    normal->z += my_strength * my_normal.z;
+
+                    const double r = region->contact[i].r / loaded_facets[0].thickness;
+                    const double s = clamp_unity((1.0 - r) / 0.9);
+                    // printf("i = %zu, s = %g, nhat = (%g, %g, %g)\n", i, s, my_normal.x, my_normal.y, my_normal.z);
+                    *sdf = std::max(s, *sdf);
+                }
+
+            }
+
+        }
+
+        if (*sdf > 0.0) {
+            normalize(normal);
+        }
+
+        // Do the thing, something like this in fix_wall_gran_region.cpp:192
+        // for (i = 0; i < nlocal; i++) {
+        //   if (!(mask[i] & groupbit)) continue;
+        //   if (! region->match(x[i][0], x[i][1], x[i][2])) continue;
+
+        //   nc = region->surface(x[i][0], x[i][1], x[i][2], radius[i] + model->pulloff_distance(radius[i], 0.0));
+        //   if (nc > tmax) error->one(FLERR, "Too many wallgran/region contacts for one particle");
+
+        }
+    }
+
 #else
+#error "using facets"
     if (
         (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
         (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
@@ -1968,6 +2064,23 @@ void FixRHEO::post_force(int /*vflag*/)
   auto *stress_compute = dynamic_cast<ComputeRHEOStress *>(fix_stress->stress_compute);
   double **stress = stress_compute->array_atom;
 
+
+  for (auto region: boundary_regions) {
+    // auto region = boundary_region;
+    // printf("Region: %p\n", region);
+    // printf("%s\n", region->id);
+
+      int regiondynamic = region->dynamic_check();
+
+      // set current motion attributes of region
+      // set_velocity() also updates prev to current step
+
+      if (regiondynamic) {
+        region->prematch();
+        region->set_velocity();
+      }
+  }
+
   // hack for BCS
   // [sdunatunga] Tue 13 Feb 2024 07:53:19 AM PST
   for (i = 0; i < nlocal; i++) {
@@ -2002,7 +2115,9 @@ void FixRHEO::post_force(int /*vflag*/)
         bool is_any_wall_sticky = false;
         uint64_t walls_bitset = 0;
         size_t facet_index = 0;
-        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp);
+        // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, atom->radius[i], domain->get_region_list());
+        // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_region);
+        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_regions);
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
