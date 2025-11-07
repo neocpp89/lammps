@@ -573,9 +573,9 @@ void ComputeRHEOStress::update_one_material_point_stress(double *pphi_d, double 
                 tau_tau = tau_tr - (p_tr - p_iterate) / h_t;
                 DUMP_PROPERTY(tau_tau);
 #endif
-                DUMP_PROPERTY(p_star);
+                // DUMP_PROPERTY(p_star);
                 double p_iterate = (alpha * tau_tr + p_tr) / (1.0 + (MU_S + h_t) * alpha);
-                DUMP_PROPERTY(p_iterate);
+                // DUMP_PROPERTY(p_iterate);
                 // for (size_t i = 0; i < 100; ++i) {
                 //     const double gamma_bar_p_dot = (p_tr - p_iterate) / (h_t * G * dt);
                 //     const double tau_iterate = tau_tr - (p_tr - p_iterate) / h_t;
@@ -586,10 +586,10 @@ void ComputeRHEOStress::update_one_material_point_stress(double *pphi_d, double 
                 //     p_iterate = tau_iterate / mu_iterate;
                 //     DUMP_PROPERTY(p_iterate);
                 // }
-                DUMP_PROPERTY(p_iterate);
+                // DUMP_PROPERTY(p_iterate);
                 tau_tau = (MU_S + h_t) * p_iterate;
-                DUMP_PROPERTY(tau_tau);
-                DUMP_PROPERTY(alpha);
+                // DUMP_PROPERTY(tau_tau);
+                // DUMP_PROPERTY(alpha);
                 // static int tmp = 0;
                 // if (tmp < 20) {
                 //     tmp++;
