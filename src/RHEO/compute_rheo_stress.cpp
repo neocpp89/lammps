@@ -75,6 +75,8 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
     { .required = true, .name = "I_0", .value = &I_0, },
     { .required = true, .name = "phi_c", .value = &PHI_C, },
     { .required = true, .name = "phi_min", .value = &PHI_MIN, },
+    { .required = true, .name = "xi", .value = &XI, },
+    { .required = true, .name = "phi_d_0", .value = &PHI_D_0, },
   };
 
   for (size_t iarg = 3; iarg < narg; ++iarg) {
@@ -157,12 +159,17 @@ void ComputeRHEOStress::init()
   DUMP_PROPERTY(LAMBDA);
   DUMP_PROPERTY(PHI_C);
   DUMP_PROPERTY(PHI_MIN);
+  DUMP_PROPERTY(XI);
 
-  // set phi_d initial to phi_c -- should act like isochoric model (without
-  // beta term).
+  // This does not seem like something we should set in the constitutive
+  // relation, but it is a state variable known by the constitutive model.
+  // Discuss how we want to bring this in, since we may want to do something
+  // spatially dependent in the lammps inputs file.
+  DUMP_PROPERTY(PHI_D_0);
+
   for (int i = 0; i < nmax_store; i++)
   {
-      stress[i][27] = PHI_MIN;
+      stress[i][27] = PHI_D_0;
   }
 
 
@@ -490,8 +497,6 @@ void ComputeRHEOStress::update_one_material_point_stress(double *pphi_d, double 
     // density is already normalized to some degree, and assume we started at phi_min
     const double phi = PHI_MIN * density;
     const double phi_d_t = *pphi_d;
-    const double XI = 2.0;
-    // const double XI = 0.0;
     const double h_t = XI * (phi_d_t - PHI_C);
     double phi_d_tau = phi_d_t;
     double which_branch = 0;

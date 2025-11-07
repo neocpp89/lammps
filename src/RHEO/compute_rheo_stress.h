@@ -65,6 +65,8 @@ class ComputeRHEOStress : public Compute {
   double I_0;
   double PHI_C;
   double PHI_MIN;
+  double XI;
+  double PHI_D_0;
 
   // Derived elastic parameters
   double G;

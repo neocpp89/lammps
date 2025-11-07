@@ -62,6 +62,8 @@ FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
     { .required = true, .name = "I_0", .value = 0.278, .set_by_input_file = false, },
     { .required = true, .name = "phi_min", .value = 0.4, .set_by_input_file = false, },
     { .required = true, .name = "phi_c", .value = 0.6, .set_by_input_file = false, },
+    { .required = true, .name = "xi", .value = 2.0, .set_by_input_file = false, },
+    { .required = true, .name = "phi_d_0", .value = 0.4, .set_by_input_file = false, },
   };
 
   comm_forward = NUM_STRESS_COMPONENTS;
