@@ -77,39 +77,9 @@ typedef struct {
     double mu;
 } stl_facet_t;
 
-typedef struct {
-    double *sdf_values;
-    bool *sticky_bits;
-
-    size_t ispan;
-    size_t jspan;
-    size_t kspan;
-    double dx;
-    double dy;
-    double dz;
-
-    // Not sure if extreme is really needed but could avoid a few divides at
-    // the cost of loading 3 doubles.
-    vector_3d_t origin;
-    vector_3d_t extreme;
-
-    // This is the triangle list at nodes (0, dx, 2*dx, ...)
-    uint64_t **triangle_lists;
-
-    // This is the triangle list across cells, spanning (0, dx), then (dx,
-    // 2*dx) etc. Note that there are only ispan-1, jspan-1, and kspan-1
-    // entries in each direction, so the indexing changes.
-    // TODO: Need to make sure that we compute this correctly when we optimize
-    // later, e.g. we don't miss if a sliver of a triangle is in a cell.
-    uint64_t **cell_centered_triangle_lists;
-} stl_voxel_grid_t;
-
-static stl_facet_t *loaded_facets = NULL;
 static size_t num_loaded_facets = 0;
 static double boundary_thickness = 0.01;
 static uint64_t sticky_bitmask = 0;
-static stl_voxel_grid_t voxel_grid = {0};
-static double stl_vgrid_scale = 3.0;
 
 struct boundary_args {
     const char *filepath;
@@ -121,7 +91,7 @@ struct boundary_args {
     bool sticky;
 };
 
-static struct boundary_args boundary_files_with_args[100];
+static std::vector<struct boundary_args> boundary_args;
 static size_t num_boundary_files_with_args = 0;
 
 static void cross(vector_3d_t * const result,
@@ -163,9 +133,8 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   int i;
   int n = atom->ntypes;
   size_t max_stl_facets = 65536;
-  for (size_t i = 0; i < DIM(boundary_files_with_args); ++i) {
-    struct boundary_args * const entry = &boundary_files_with_args[i];
-    entry->thickness = boundary_thickness;
+  for (auto && entry : boundary_args) {
+    entry.thickness = boundary_thickness;
   }
 
   struct boundary_args * boundary_arg = NULL;
@@ -237,13 +206,6 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       if (iarg + n >= narg) utils::missing_cmd_args(FLERR, "fix rheo density", error);
       for (i = 1; i <= n; i++) rho0[i] = utils::numeric(FLERR, arg[iarg + i], false, lmp);
       iarg += n;
-    } else if (strcmp(arg[iarg], "boundary/stlfile") == 0) {
-      if (iarg + 1 >= narg) error->all(FLERR, "Illegal stlfile option in fix rheo");
-      // shift to next boundary arg file
-      num_boundary_files_with_args++;
-      boundary_arg = &boundary_files_with_args[num_boundary_files_with_args-1];
-      boundary_arg->filepath = arg[iarg + 1];
-      iarg += 1;
     } else if (strcmp(arg[iarg], "boundary/rampthickness") == 0) {
       if (iarg + 1 >= narg) error->all(FLERR, "Illegal ramp thickness option in fix rheo");
       if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
@@ -270,10 +232,6 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       if (boundary_arg == NULL) error->all(FLERR, "Attempt to set boundary variable before stlfile");
       boundary_arg->mu = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
       iarg += 1;
-    } else if (strcmp(arg[iarg], "boundary/vgridscale") == 0) {
-      if (iarg + 1 >= narg) error->all(FLERR, "Illegal voxel grid scale option in fix rheo");
-      stl_vgrid_scale = utils::numeric(FLERR, arg[iarg + 1], false, lmp);
-      iarg += 1;
     } else if (strcmp(arg[iarg], "speed/sound") == 0) {
       if (iarg + n >= narg) utils::missing_cmd_args(FLERR, "fix rheo speed/sound", error);
       for (i = 1; i <= n; i++) {
@@ -283,11 +241,10 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
       iarg += n;
     } else if (strcmp(arg[iarg],"boundary/region") == 0) {
       if (narg < iarg+2) error->all(FLERR,"Illegal region command");
-      const int num_boundaries = utils::inumeric(FLERR, arg[iarg + 1], false, lmp);
-      for (i = 1; i <= num_boundaries; ++i) {
-          boundary_region_ids.push_back(utils::strdup(arg[iarg+1+i]));
-      }
-      iarg += (1 + num_boundaries);
+      boundary_region_ids.push_back(utils::strdup(arg[iarg+1]));
+      boundary_args.push_back({});
+      boundary_arg = &boundary_args[boundary_args.size()-1];
+      iarg += 1;
     } else {
       error->all(FLERR, "Illegal fix rheo command: {}", arg[iarg]);
     }
@@ -301,51 +258,14 @@ FixRHEO::FixRHEO(LAMMPS *lmp, int narg, char **arg) :
   if (lmp->citeme) lmp->citeme->add(cite_rheo);
 #endif
 
-  if (num_boundary_files_with_args > 0) {
-    num_loaded_facets = max_stl_facets;
-    loaded_facets = static_cast<stl_facet_t *>(calloc(max_stl_facets, sizeof(loaded_facets[0])));
-    if (loaded_facets == NULL) {
-        error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
-    }
-    num_loaded_facets = 0;
-  }
-
-  for (size_t i = 0; i < num_boundary_files_with_args; ++i) {
-    const struct boundary_args * const entry = &boundary_files_with_args[i];
-    size_t local_loaded_facets = max_stl_facets;
-    stl_facet_t * const facets = static_cast<stl_facet_t *>(calloc(max_stl_facets, sizeof(loaded_facets[0])));
-    if (facets == NULL) {
-        error->all(FLERR, "Could not allocate space for {} facets.", max_stl_facets);
-    }
-
-    const bool success = parse_stl_with_args(facets, &local_loaded_facets, entry);
-    if (!success) {
-        error->all(FLERR, "Failed to parse STL file {}.", entry->filepath);
-    }
-
-    for (size_t j = 0; j < local_loaded_facets; ++j) {
-        if (num_loaded_facets >= max_stl_facets) {
-            error->all(FLERR, "Combined STL file loads exceeds {} facets.", max_stl_facets);
-        }
-        loaded_facets[num_loaded_facets] = facets[j];
-        printf("facet %zu:\n", num_loaded_facets);
-        print_facet(&loaded_facets[num_loaded_facets]);
-        num_loaded_facets++;
-    }
-
-
-    for (auto boundary_region_id : boundary_region_ids) {
-        if (boundary_region_id.length() > 0)
-        {
-            auto boundary_region = domain->get_region_by_id(boundary_region_id);
-            if (!boundary_region) error->all(FLERR, "Region {} for fix rheo does not exist", boundary_region_id);
-            boundary_regions.push_back(boundary_region);
-            nc.push_back(0);
-            // nregion = region->nregion;
-        }
-    }
-
-    free(facets);
+  for (auto boundary_region_id : boundary_region_ids) {
+      if (boundary_region_id.length() > 0)
+      {
+          auto boundary_region = domain->get_region_by_id(boundary_region_id);
+          if (!boundary_region) error->all(FLERR, "Region {} for fix rheo does not exist", boundary_region_id);
+          boundary_regions.push_back(boundary_region);
+          nc.push_back(0);
+      }
   }
 }
 
@@ -943,206 +863,9 @@ static void update_triangle_list(uint64_t **list, uint64_t index_to_add)
     }
 }
 
-static size_t sdf_index_from_spans(const stl_voxel_grid_t *vgrid, size_t i, size_t j, size_t k)
-{
-    return (i * vgrid->jspan * vgrid->kspan) + (j * vgrid->kspan) + k;
-}
-
-static size_t sdf_cell_index_from_spans(const stl_voxel_grid_t *vgrid, size_t i, size_t j, size_t k)
-{
-    return (i * (vgrid->jspan - 1) * (vgrid->kspan - 1)) + (j * (vgrid->kspan - 1)) + k;
-}
-
-static void get_stl_facet_bounds(vector_3d_t *vmin, vector_3d_t *vmax, const stl_facet_t * const facet)
-{
-    *vmin = (vector_3d_t){0};
-    *vmax = (vector_3d_t){0};
-
-    vmax->x = std::max(std::max(std::max(facet->a.x, facet->b.x), facet->c.x), vmax->x);
-    vmax->y = std::max(std::max(std::max(facet->a.y, facet->b.y), facet->c.y), vmax->y);
-    vmax->z = std::max(std::max(std::max(facet->a.z, facet->b.z), facet->c.z), vmax->z);
-    vmin->x = std::min(std::min(std::min(facet->a.x, facet->b.x), facet->c.x), vmin->x);
-    vmin->y = std::min(std::min(std::min(facet->a.y, facet->b.y), facet->c.y), vmin->y);
-    vmin->z = std::min(std::min(std::min(facet->a.z, facet->b.z), facet->c.z), vmin->z);
-}
-
-
-static void sdf_and_normal_from_vgrid_old(double *sdf, vector_3d_t *normal, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp)
-{
-    if (
-        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
-        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
-        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
-    ) {
-        return;
-    }
-
-    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
-    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
-    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
-    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
-    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
-    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
-    const double wi = 1.0 - wip;
-    const double wj = 1.0 - wjp;
-    const double wk = 1.0 - wkp;
-
-    double s[] = {
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j, k)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j, k+1)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j+1, k)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j, k)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i, j+1, k+1)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j+1, k)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j, k+1)],
-        vgrid->sdf_values[sdf_index_from_spans(vgrid, i+1, j+1, k+1)],
-    };
-
-    // Make s = 1 the boundary.
-    bool allzero = true;
-    for (size_t i = 0; i < DIM(s); ++i) {
-        s[i] = clamp_unity(1.0 - s[i]);
-        if (s[i] != 0.0) {
-            allzero = false;
-        }
-    }
-
-    if (allzero) {
-        *sdf = 0.0;
-        return;
-    }
-
-    const bool b[] = {
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j, k)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j, k+1)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j+1, k)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j, k)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i, j+1, k+1)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j+1, k)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j, k+1)],
-        vgrid->sticky_bits[sdf_index_from_spans(vgrid, i+1, j+1, k+1)],
-    };
-
-    *sticky = false;
-    for (size_t i = 0; i < DIM(b); ++i) {
-        *sticky |= b[i];
-    }
-
-    const double sp = (
-        wi * wj * wk * s[0] +
-        wi * wj * wkp * s[1] +
-        wi * wjp * wk * s[2] +
-        wip * wj * wk * s[3] +
-        wi * wjp * wkp * s[4] +
-        wip * wjp * wk * s[5] +
-        wip * wj * wkp * s[6] +
-        wip * wjp * wkp * s[7]
-    );
-
-    *sdf = sp;
-
-    const double dspdx = (
-        -wj * wk * s[0] +
-        -wj * wkp * s[1] +
-        -wjp * wk * s[2] +
-        wj * wk * s[3] +
-        -wjp * wkp * s[4] +
-        wjp * wk * s[5] +
-        wj * wkp * s[6] +
-        wjp * wkp * s[7]
-    );
-
-    const double dspdy = (
-        -wi * wk * s[0] +
-        -wi * wkp * s[1] +
-        wi * wk * s[2] +
-        -wip * wk * s[3] +
-        wi * wkp * s[4] +
-        wip * wk * s[5] +
-        -wip * wkp * s[6] +
-        wip * wkp * s[7]
-    );
-
-    const double dspdz = (
-        -wi * wj * s[0] +
-        wi * wj * s[1] +
-        -wi * wjp * s[2] +
-        -wip * wj * s[3] +
-        wi * wjp * s[4] +
-        -wip * wjp * s[5] +
-        wip * wj * s[6] +
-        wip * wjp * s[7]
-    );
-
-    // we flipped the sign of s, so we need to flip this as well to get the
-    // right normal.
-    normal->x = -dspdx;
-    normal->y = -dspdy;
-    normal->z = -dspdz;
-
-    normalize(normal);
-}
-
-typedef struct {
-    double radius_1;
-    double radius_2;
-    vector_3d_t origin_1;
-    vector_3d_t origin_2;
-    vector_3d_t axis;
-    double h;
-    double cos_theta;
-    double sin_theta;
-    double tan_theta;
-} cone_t;
-
-static cone_t my_cone = {
-    // .radius_1 = 0.15,
-    // .radius_2 = 1.20,
-    // .radius_1 = 1.15,
-    // .radius_2 = 4.20,
-    .radius_1 = 0.15,
-    .radius_2 = 3.20,
-    .origin_1 = {
-        .x = 0.0,
-        .y = 0.0,
-        .z = 0.0,
-    },
-    .origin_2 = {
-        .x = 0.0,
-        .y = 0.0,
-        // .z = 2.8,
-        .z = 6.8,
-    },
-};
-
-static void init_cone(cone_t * const cone)
-{
-    if (cone == NULL) {
-        return;
-    }
-
-    vsub(&cone->axis, &cone->origin_2, &cone->origin_1);
-    cone->h = sqrt(magnitude_squared(&cone->axis));
-    if (cone->h > 0.0) {
-        cone->axis.x /= cone->h;
-        cone->axis.y /= cone->h;
-        cone->axis.z /= cone->h;
-        const double delta_r = cone->radius_2 - cone->radius_1;
-        const double s = hypot(cone->h, delta_r);
-        cone->cos_theta = cone->h / s;
-        cone->sin_theta = delta_r / s;
-        cone->tan_theta = delta_r / cone->h;
-    } else {
-        cone->axis.x = 0.0;
-        cone->axis.y = 0.0;
-        cone->axis.z = 0.0;
-        cone->cos_theta = 0.0;
-        cone->sin_theta = 0.0;
-    }
-}
 
 // See https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2018/p0811r2.html
-double stable_lerp(double a, double b, double t)
+static double stable_lerp(double a, double b, double t)
 {
   // Exact, monotonic, bounded, determinate, and (for a=b=0) consistent:
   if(a<=0 && b>=0 || a>=0 && b<=0) return t*b + (1.0-t)*a;
@@ -1154,153 +877,13 @@ double stable_lerp(double a, double b, double t)
   return t>1.0 == b>a ? std::max(b,x) : std::min(b,x);  // monotonic near t=1
 }
 
-static void boundary_strength_for_cone(double *sdf, vector_3d_t *normal, const cone_t * const cone, double thickness, const vector_3d_t * const xp)
-{
-    if ((sdf == NULL) ||
-        (normal == NULL) ||
-        (cone == NULL)) {
-        return;
-    }
-
-    if (cone->h == 0.0) {
-        return;
-    }
-
-    *sdf = 0.0;
-    normal->x = 0.0;
-    normal->y = 0.0;
-    normal->z = 0.0;
-
-    vector_3d_t p = {0};
-    vsub(&p, xp, &cone->origin_1);
-
-    // cone->axis is normalized
-    const double along_axis = dot(&p, &cone->axis);
-    if (along_axis >= 0.0) {
-        const double xh =  along_axis / cone->h;
-        const double radius_at_projected_point = stable_lerp(cone->radius_1, cone->radius_2, xh);
-        const double rpp2 = radius_at_projected_point * radius_at_projected_point;
-
-        vector_3d_t radial_vector = {0};
-        vector_3d_t p_axis = {
-            .x = along_axis * cone->axis.x,
-            .y = along_axis * cone->axis.y,
-            .z = along_axis * cone->axis.z,
-        };
-        vsub(&radial_vector, &p, &p_axis);
-        const double r2 = magnitude_squared(&radial_vector);
-
-        // On the interior of the cone, assume that radius 2 > radius 1 for the normal to point this way
-        if (r2 <= rpp2) {
-            const double r = sqrt(r2);
-            // const double alpha = (cone->radius_2 - cone->radius_1) / cone->h;
-            // normal->x = (r * alpha * cone->axis.x) - radial_vector.x;
-            // normal->y = (r * alpha * cone->axis.y) - radial_vector.y;
-            // normal->z = (r * alpha * cone->axis.z) - radial_vector.z;
-
-            // const double z = r * cone->tan_theta;
-            // normal->x = (z * cone->axis.x) - radial_vector.x;
-            // normal->y = (z * cone->axis.y) - radial_vector.y;
-            // normal->z = (z * cone->axis.z) - radial_vector.z;
-            const double xy = hypot(xp->x, xp->y);
-            normal->x = -cone->cos_theta * xp->x / xy;
-            normal->y = -cone->cos_theta * xp->y / xy;
-            normal->z = cone->sin_theta;
-            // printf("cos_theta = %.9f\n", cone->cos_theta);
-            // printf("normal->z = %.9f\n", normal->z);
-            const double n2 = 1.0;
-            // const double n2 = magnitude_squared(normal);
-            if (n2 > 0.0) {
-                // const double n = sqrt(n2);
-                // normal->x /= n;
-                // normal->y /= n;
-                // normal->z /= n;
-                const double delta = radius_at_projected_point - r;
-                if (delta <= 0.0) {
-                    *sdf = 1.0;
-                } else {
-                    const double s = delta * cone->cos_theta / thickness;
-                    *sdf = clamp_unity((1.0 - s) / 0.9);
-                }
-            }
-        }
-    }
-}
-
-static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const stl_voxel_grid_t * const vgrid, const vector_3d_t * const xp, double radius,
+static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const vector_3d_t * const xp, double *mu_wall,
         const std::vector<Region *> &region_list,
+        const std::vector<struct boundary_args> &boundary_arg_list,
         std::vector<int> &nc
     // Region *boundary_region
 )
 {
-// #define FIXED_GEOMETRY 1
-#define USE_LAMMPS_REGIONS 1
-#if defined(FIXED_GEOMETRY)
-    double cylinder_bc_strength = 0.0;
-    vector_3d_t cylinder_bc_normal = {0};
-    {
-        const double cylinder_radius = 1.15;
-        const vector_3d_t cylinder_axis = {
-            .x = 0.0,
-            .y = 0.0,
-            .z = 1.0,
-        };
-        const vector_3d_t cylinder_axis_origin_point {
-            .x = 0.0,
-            .y = 0.0,
-            .z = 0.0,
-        };
-
-        vector_3d_t v_xp_from_cyl = {0};
-        vsub(&v_xp_from_cyl, xp, &cylinder_axis_origin_point);
-        const double s = dot(&cylinder_axis, &v_xp_from_cyl);
-
-        const vector_3d_t p_along_axis = {
-            .x = s * cylinder_axis.x + cylinder_axis_origin_point.x,
-            .y = s * cylinder_axis.y + cylinder_axis_origin_point.y,
-            .z = s * cylinder_axis.z + cylinder_axis_origin_point.z,
-        };
-
-        vector_3d_t v_perpendicular_to_axis = {0};
-        vsub(&v_perpendicular_to_axis, xp, &p_along_axis);
-
-        const double perpendicular_distance_from_axis = sqrt(magnitude_squared(&v_perpendicular_to_axis));
-
-        if (0.0 < perpendicular_distance_from_axis &&
-            perpendicular_distance_from_axis <= cylinder_radius) {
-            // Inside the cylinder (the way we want).
-            cylinder_bc_normal.x = -v_perpendicular_to_axis.x / perpendicular_distance_from_axis;
-            cylinder_bc_normal.y = -v_perpendicular_to_axis.y / perpendicular_distance_from_axis;
-            cylinder_bc_normal.z = -v_perpendicular_to_axis.z / perpendicular_distance_from_axis;
-            const double r = (cylinder_radius - perpendicular_distance_from_axis) / loaded_facets[0].thickness;
-            cylinder_bc_strength = clamp_unity((1.0 - r) / 0.9);
-        } else {
-            cylinder_bc_strength = 0.0;
-        }
-    }
-
-    double cone_bc_strength = 0.0;
-    vector_3d_t cone_bc_normal = {0};
-    {
-        boundary_strength_for_cone(&cone_bc_strength, &cone_bc_normal, &my_cone, loaded_facets[0].thickness, xp);
-    }
-
-    // mix normals
-    {
-        if (cone_bc_strength == 0.0 && cylinder_bc_strength == 0.0) {
-            *sdf = 0.0;
-        } else {
-            normal->x = cylinder_bc_strength * cylinder_bc_normal.x + cone_bc_strength * cone_bc_normal.x;
-            normal->y = cylinder_bc_strength * cylinder_bc_normal.y + cone_bc_strength * cone_bc_normal.y;
-            normal->z = cylinder_bc_strength * cylinder_bc_normal.z + cone_bc_strength * cone_bc_normal.z;
-            normalize(normal);
-
-            // Use the closer one to set the stength.
-            *sdf = std::max(cylinder_bc_strength, cone_bc_strength);
-        }
-    }
-#error "using fixed geom"
-#elif defined(USE_LAMMPS_REGIONS)
     *sdf = 0.0;
     *normal = (vector_3d_t) {
         0.0,
@@ -1312,8 +895,9 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
     // Do first to get all contacts in all regions.
     for (size_t ii = 0; ii < region_list.size(); ++ii) {
         auto region = region_list[ii];
+        const auto & args = boundary_arg_list[ii];
         if (region->match(xp->x, xp->y, xp->z)) {
-            nc[ii] = region->surface(xp->x, xp->y, xp->z, radius);
+            nc[ii] = region->surface(xp->x, xp->y, xp->z, args.thickness);
         } else {
             nc[ii] = 0;
         }
@@ -1321,6 +905,7 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
 
     for (size_t ii = 0; ii < region_list.size(); ++ii) {
         auto region = region_list[ii];
+        const auto & args = boundary_arg_list[ii];
         if (nc[ii] > 0) {
             for (size_t i = 0; i < nc[ii]; ++i) {
                 if (region->contact[i].r > 0.0) {
@@ -1335,12 +920,13 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
                     // other regions. 
                     for (size_t jj = 0; jj < region_list.size(); ++jj) {
                         auto other_region = region_list[jj];
+                        const auto & other_args = boundary_arg_list[jj];
                         for (size_t j = 0; j < nc[jj]; ++j) {
                             // Not the current wall we're considering (chain rule), and
                             // product of all other walls that are within range.
                             const bool is_current_contact = (ii == jj) && (i == j);
 
-                            if (!is_current_contact && (other_region->contact[j].r < loaded_facets[0].thickness)) {
+                            if (!is_current_contact && (other_region->contact[j].r < other_args.thickness)) {
                                 my_strength *= other_region->contact[j].r;
                             }
                         }
@@ -1350,10 +936,15 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
                     normal->y += my_strength * my_normal.y;
                     normal->z += my_strength * my_normal.z;
 
-                    const double r = region->contact[i].r / loaded_facets[0].thickness;
+                    const double r = region->contact[i].r / args.thickness;
                     const double s = clamp_unity((1.0 - r) / 0.9);
                     // printf("i = %zu, s = %g, nhat = (%g, %g, %g)\n", i, s, my_normal.x, my_normal.y, my_normal.z);
                     *sdf = std::max(s, *sdf);
+
+                    // rethink how this should be done with mixing.
+                    if (s == *sdf) {
+                        *mu_wall = args.mu;
+                    }
                 }
             }
         }
@@ -1362,203 +953,10 @@ static void sdf_and_normal_from_vgrid(double *sdf, vector_3d_t *normal, size_t *
     if (*sdf > 0.0) {
         normalize(normal);
     }
-
-#else
-#error "using facets"
-    if (
-        (xp->x < vgrid->origin.x) || (xp->x > vgrid->extreme.x) ||
-        (xp->y < vgrid->origin.y) || (xp->y > vgrid->extreme.y) ||
-        (xp->z < vgrid->origin.z) || (xp->z > vgrid->extreme.z)
-    ) {
-        return;
-    }
-
-    const size_t i = (xp->x - vgrid->origin.x) / vgrid->dx;
-    const size_t j = (xp->y - vgrid->origin.y) / vgrid->dy;
-    const size_t k = (xp->z - vgrid->origin.z) / vgrid->dz;
-    const double wip = (((xp->x - vgrid->origin.x) / vgrid->dx) - i);
-    const double wjp = (((xp->y - vgrid->origin.y) / vgrid->dy) - j);
-    const double wkp = (((xp->z - vgrid->origin.z) / vgrid->dz) - k);
-    const double wi = 1.0 - wip;
-    const double wj = 1.0 - wjp;
-    const double wk = 1.0 - wkp;
-
-    const uint64_t * const triangle_list =
-        vgrid->cell_centered_triangle_lists[sdf_cell_index_from_spans(vgrid, i, j, k)];
-
-    if (triangle_list == NULL) {
-        *sdf = 0.0;
-        return;
-    }
-
-    const size_t num_triangles_in_cell_list = static_cast<size_t>(triangle_list[0]);
-
-    static double *distances = NULL;
-    static size_t capacity_distances = 0;
-    if (distances == NULL) {
-        capacity_distances = num_triangles_in_cell_list;
-        distances = static_cast<double *>(calloc(capacity_distances, sizeof(distances[0])));
-    }
-
-    if (capacity_distances < num_triangles_in_cell_list) {
-        free(distances);
-        capacity_distances = num_triangles_in_cell_list;
-        distances = static_cast<double *>(calloc(capacity_distances, sizeof(distances[0])));
-        printf("Increasing max distance list size to %zu\n", capacity_distances);
-    }
-
-#if defined(DUPLICATION_CHECK)
-    // FIXME: Debug, this is a duplication check, will be slow.
-    size_t duplication_count = 0;
-    for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
-        for (size_t j = (i+1); j < num_triangles_in_cell_list; ++j) {
-            if (triangle_list[i + 1] == triangle_list[j + 1]) {
-                duplication_count++;
-            }
-        }
-    }
-
-    if (duplication_count != 0) {
-        printf("Duplication detected, unfiltered count is %zu\n", duplication_count);
-    }
-#endif
-
-    // Now this just looks like the old style of problem but checking against a
-    // smaller number of triangles.
-    {
-        // Take the function f = prod(d_1, d_2, ...) (d_i distance from boundary i).
-        // The gradient gives us a nice direction, which can be written as
-        // sum_over_i(n_i * prod_for_j_not_equal_i(d_j)) where n_i is the normal to
-        // the boundary segment.
-
-        bool any_wall_detected = false;
-        for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
-            const size_t bi = triangle_list[i + 1];
-            const stl_facet_t * const entry = &loaded_facets[bi];
-            stl_facet_distance(&distances[i], xp, entry);
-
-            // Wrong side of the BC, set back to a far away value.
-            if (distances[i] < 0.0) {
-                distances[i] = DBL_MAX;
-            }
-
-            if (distances[i] < entry->thickness) {
-                any_wall_detected = true;
-            }
-        }
-
-        // At least one wall detected.
-        if (any_wall_detected) {
-            double min_d = distances[0];
-            size_t min_wall_index = 0;
-            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
-                const size_t bi = triangle_list[i + 1];
-                const stl_facet_t * const entry = &loaded_facets[bi];
-                if ((distances[i] < entry->thickness) && (distances[i] < min_d)) {
-                    min_d = distances[i];
-                    min_wall_index = bi;
-                }
-            }
-            // Do we want min distance, or max strength BC?
-            // *strength = clamp_unity(1.0 - (min_d / loaded_facets[min_wall_index].thickness));
-            // Clip the last closest tenth so there's a bit of dead zone where the
-            // BC is at full strength.
-            *sdf = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
-            *facet_index = min_wall_index;
-        } else {
-            *sdf = 0.0;
-        }
-
-        if (*sdf != 0.0) {
-            *normal = (vector_3d_t) {
-                0.0,
-                0.0,
-                0.0
-            };
-            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
-                double pi_d = 1.0;
-                const size_t bi = triangle_list[i + 1];
-                for (size_t j = 0; j < num_triangles_in_cell_list; ++j) {
-                    const size_t bj = triangle_list[j + 1];
-                    const stl_facet_t * const entry = &loaded_facets[bj];
-                    // Not the current wall we're considering (chain rule), and
-                    // product of all other walls that are within range.
-                    if ((j != i) && (distances[j] < entry->thickness)) {
-                        // distances should all be positive by this point, so fabs is
-                        // unnecessary...
-                        // pi_d *= fabs(distances[j]);
-                        pi_d *= distances[j];
-                    }
-                }
-
-                normal->x += pi_d * loaded_facets[bi].normal.x;
-                normal->y += pi_d * loaded_facets[bi].normal.y;
-                normal->z += pi_d * loaded_facets[bi].normal.z;
-            }
-
-            normalize(normal);
-
-
-            bool is_any_wall_sticky = false;
-            for (size_t i = 0; i < num_triangles_in_cell_list; ++i) {
-                const size_t bi = triangle_list[i + 1];
-                const stl_facet_t * const entry = &loaded_facets[bi];
-                // Check if we are in contact with a sticky wall.
-                if (distances[i] < entry->thickness) {
-                    is_any_wall_sticky |= entry->sticky;
-                }
-            }
-            *sticky = is_any_wall_sticky;
-        }
-    }
-#endif
 }
 
 static void bc_setup(void)
 {
-    init_cone(&my_cone);
-/*
-    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
-        sd_boundary_3d_t * const entry = &b3[bi];
-        entry->origin.x *= scale;
-        entry->origin.y *= scale;
-        entry->origin.z *= scale;
-        entry->r1.x *= scale;
-        entry->r1.y *= scale;
-        entry->r1.z *= scale;
-        entry->r2.x *= scale;
-        entry->r2.y *= scale;
-        entry->r2.z *= scale;
-    }
-
-    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
-        sd_boundary_3d_t * const entry = &b3[bi];
-        entry->n1 = entry->r1;
-        normalize(&entry->n1);
-        entry->n2 = entry->r2;
-        normalize(&entry->n2);
-        entry->n3 = compute_normal(&entry->r1, &entry->r2);
-
-        entry->r1_mag = sqrt(magnitude_squared(&entry->r1));
-        entry->r2_mag = sqrt(magnitude_squared(&entry->r2));
-    }
-
-    for (size_t bi = 0; bi < sizeof(b3)/sizeof(b3[0]); ++bi) {
-        const sd_boundary_3d_t * const entry = &b3[bi];
-        printf("boundary[%zu]: origin = {%.17g, %.17g, %.17g}\n", bi, entry->origin.x, entry->origin.y, entry->origin.z);
-        printf("boundary[%zu]: r1 = {%.17g, %.17g, %.17g}\n", bi, entry->r1.x, entry->r1.y, entry->r1.z);
-        printf("boundary[%zu]: r2 = {%.17g, %.17g, %.17g}\n", bi, entry->r2.x, entry->r2.y, entry->r2.z);
-        printf("boundary[%zu]: ramp_thickness = %.17g\n", bi, entry->ramp_thickness);
-        printf("boundary[%zu]: dead_thickness = %.17g\n", bi, entry->dead_thickness);
-        printf("boundary[%zu]: mu = %.17g\n", bi, entry->mu);
-        printf("boundary[%zu]: n1 = {%.17g, %.17g, %.17g}\n", bi, entry->n1.x, entry->n1.y, entry->n1.z);
-        printf("boundary[%zu]: n2 = {%.17g, %.17g, %.17g}\n", bi, entry->n2.x, entry->n2.y, entry->n2.z);
-        printf("boundary[%zu]: n3 = {%.17g, %.17g, %.17g}\n", bi, entry->n3.x, entry->n3.y, entry->n3.z);
-        printf("boundary[%zu]: r1_mag = %.17g\n", bi, entry->r1_mag);
-        printf("boundary[%zu]: r2_mag = %.17g\n", bi, entry->r2_mag);
-        printf("---\n");
-    }
-*/
 }
 
 static void stl_facet_distance(double *distance, const vector_3d_t * const xp, const stl_facet_t * const facet)
@@ -1623,88 +1021,6 @@ static void set_wall_bitset(uint64_t *wall_bitset, size_t wall_index)
     *wall_bitset |= (UINT64_C(1) << wall_index);
 }
 
-#if 0
-static void boundary_force_direction_from_levelset(double *strength,
-                                                   vector_3d_t *direction,
-                                                   uint64_t *walls_bitset,
-                                                   const vector_3d_t * const xp)
-                                                   // ,
-                                                   // const sd_boundary_3d_t * const boundaries,
-                                                   // size_t num_boundaries)
-{
-    // Take the function f = prod(d_1, d_2, ...) (d_i distance from boundary i).
-    // The gradient gives us a nice direction, which can be written as
-    // sum_over_i(n_i * prod_for_j_not_equal_i(d_j)) where n_i is the normal to
-    // the boundary segment.
-    static double distances[DIM(loaded_facets)] = {0};
-    // already part of the boundary!
-    // static vector_3d_t normals[DIM(b3)] = {0};
-
-    uint64_t wb = 0;
-    for (size_t bi = 0; bi < num_loaded_facets; ++bi) {
-        const stl_facet_t * const entry = &loaded_facets[bi];
-        stl_facet_distance(&distances[bi], xp, entry);
-
-        // Wrong side of the BC, set back to a far away value.
-        if (distances[bi] < 0.0) {
-            distances[bi] = DBL_MAX;
-        }
-
-        if (distances[bi] < entry->thickness) {
-            set_wall_bitset(&wb, bi);
-        }
-    }
-
-    *walls_bitset = wb;
-
-    // At least one wall detected.
-    if (wb != 0) {
-        double min_d = distances[0];
-        size_t min_wall_index = 0;
-        for (size_t i = 0; i < num_loaded_facets; ++i) {
-            if (is_wall_close(wb, i) && (distances[i] < min_d)) {
-                min_d = distances[i];
-                min_wall_index = i;
-            }
-        }
-        // Do we want min distance, or max strength BC?
-        // *strength = clamp_unity(1.0 - (min_d / loaded_facets[min_wall_index].thickness));
-        // Clip the last closest tenth so there's a bit of dead zone where the
-        // BC is at full strength.
-        *strength = clamp_unity((1.0 - (min_d / loaded_facets[min_wall_index].thickness)) / 0.9);
-    } else {
-        *strength = 0.0;
-    }
-
-    if (*strength != 0.0) {
-        *direction = (vector_3d_t) {
-            0.0,
-            0.0,
-            0.0
-        };
-        for (size_t i = 0; i < num_loaded_facets; ++i) {
-            double pi_d = 1.0;
-            for (size_t j = 0; j < num_loaded_facets; ++j) {
-                // Not the current wall we're considering (chain rule), and
-                // product of all other walls that are within range.
-                if ((j != i) && is_wall_close(wb, j)) {
-                    // distances should all be positive by this point, so fabs is
-                    // unnecessary...
-                    // pi_d *= fabs(distances[j]);
-                    pi_d *= distances[j];
-                }
-            }
-
-            direction->x += pi_d * loaded_facets[i].normal.x;
-            direction->y += pi_d * loaded_facets[i].normal.y;
-            direction->z += pi_d * loaded_facets[i].normal.z;
-        }
-
-        normalize(direction);
-    }
-}
-#endif
-
 static void boundary_normal(double *xn, double *yn, const sd_boundary_t * const boundary)
 {
     const double dx = boundary->xr - boundary->xl;
@@ -1722,53 +1038,6 @@ static double clamp_unity(double v)
         return 1.0;
     } else {
         return v;
-    }
-}
-
-static void boundary_strength(double *strength, bool *in_dead_zone, double x, double y, const sd_boundary_t * const boundary)
-{
-    const double dtx = x - boundary->xl;
-    const double dty = y - boundary->yl;
-
-    const double dx = boundary->xr - boundary->xl;
-    const double dy = boundary->yr - boundary->yl;
-
-    const double s = (dx * dtx + dy * dty) / (dx * dx + dy * dy);
-
-    // set outputs
-    *strength = 0.0;
-    *in_dead_zone = false;
-
-    // Nominally within line segment region.
-    if (0.0 <= s && s <= 1.0) {
-        const double r = hypot(dx, dy);
-        double d = 0.0;
-        if (dx != 0.0) {
-            d = r * ((dty - dy * s) / dx);
-        } else if (dy != 0.0) {
-            d = r * (-(dtx - dx * s) / dy);
-        }
-
-        if (0.0 <= d && d <= boundary->ramp_thickness) {
-            *strength = clamp_unity(1.0 - (d / boundary->ramp_thickness));
-            *in_dead_zone = false;
-        }
-
-        if (-boundary->dead_thickness <= d && d < 0.0) {
-            *strength = 1.0;
-            *in_dead_zone = true;
-        }
-    }
-}
-
-static double sgn(double x)
-{
-    if (x > 0.0) {
-        return 1.0;
-    } else if (x == 0.0) {
-        return 0.0;
-    } else {
-        return -1.0;
     }
 }
 
@@ -1856,9 +1125,8 @@ void FixRHEO::post_force(int /*vflag*/)
         bool is_any_wall_sticky = false;
         uint64_t walls_bitset = 0;
         size_t facet_index = 0;
-        // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, atom->radius[i], domain->get_region_list());
-        // sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_region);
-        sdf_and_normal_from_vgrid(&s, &fdir, &facet_index, &is_any_wall_sticky, &voxel_grid, &xp, loaded_facets[0].thickness, boundary_regions, nc);
+        double mu_wall = 0.0;
+        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc);
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
@@ -2001,7 +1269,6 @@ void FixRHEO::post_force(int /*vflag*/)
 #endif
                 // facet_index
                 // const double mu_wall = 0.3;
-                const double mu_wall = loaded_facets[facet_index].mu;
 
                 const vector_3d_t normal = fdir;
 
