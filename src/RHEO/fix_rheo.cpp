@@ -880,7 +880,8 @@ static double stable_lerp(double a, double b, double t)
 static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t *facet_index, bool *sticky, const vector_3d_t * const xp, double *mu_wall,
         const std::vector<Region *> &region_list,
         const std::vector<struct boundary_args> &boundary_arg_list,
-        std::vector<int> &nc
+        std::vector<int> &nc,
+        vector_3d_t *vw
     // Region *boundary_region
 )
 {
@@ -908,6 +909,7 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
         const auto & args = boundary_arg_list[ii];
         if (nc[ii] > 0) {
             for (size_t i = 0; i < nc[ii]; ++i) {
+                double xp_array[3] = { xp->x, xp->y, xp->z };
                 if (region->contact[i].r > 0.0) {
                     double my_strength = 1.0;
                     const vector_3d_t my_normal = {
@@ -944,6 +946,21 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
                     // rethink how this should be done with mixing.
                     if (s == *sdf) {
                         *mu_wall = args.mu;
+
+                        double vwall[3] = {0};
+                        region->velocity_contact(vwall, xp_array, i);
+                        if ((vwall[0] != 0.0) ||
+                            (vwall[1] != 0.0) ||
+                            (vwall[2] != 0.0)) {
+                            // printf("vwall = %.17g %.17g %.17g\n",
+                            //     vwall[0],
+                            //     vwall[1],
+                            //     vwall[2]
+                            // );
+                            vw->x = vwall[0];
+                            vw->y = vwall[1];
+                            vw->z = vwall[2];
+                        }
                     }
                 }
             }
@@ -1126,7 +1143,8 @@ void FixRHEO::post_force(int /*vflag*/)
         uint64_t walls_bitset = 0;
         size_t facet_index = 0;
         double mu_wall = 0.0;
-        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc);
+        vector_3d_t vwall = {0};
+        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc, &vwall);
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
@@ -1168,108 +1186,6 @@ void FixRHEO::post_force(int /*vflag*/)
             // We can slide along all walls in this contact, so we need a
             // direction.
             if (!is_any_wall_sticky) {
-#if 0
-                const double mu_wall = 0.0;
-
-                const vector_3d_t normal = fdir;
-
-                const vector_3d_t vf = {
-                    .x = f[i][0],
-                    .y = f[i][1],
-                    .z = f[i][2],
-                };
-
-                const vector_3d_t vft = {
-                    .x = ftest[0],
-                    .y = ftest[1],
-                    .z = ftest[2],
-                };
-
-                // Force before any wall modifications
-                const double fn_mag = dot(&vf, &normal);
-                const double fn[] = {
-                    normal.x * fn_mag,
-                    normal.y * fn_mag,
-                    normal.z * fn_mag,
-                };
-                const vector_3d_t ftt = {
-                    .x = vf.x - fn[0],
-                    .y = vf.y - fn[1],
-                    .z = vf.z - fn[2],
-                };
-                const double ftt_mag2 = magnitude_squared(&ftt);
-                double ftt_mag = 0.0;
-                vector_3d_t ftt_direction = {
-                    .x = 0,
-                    .y = 0,
-                    .z = 0,
-                };
-                if (ftt_mag2 > 0.0) {
-                    ftt_mag = sqrt(ftt_mag2);
-                    ftt_direction = ftt;
-                    normalize(&ftt_direction);
-                }
-
-                // Force after impact with the wall
-                const double fw_mag = std::max(0.0, dot(&vft, &normal));
-                const double fw[] = {
-                    normal.x * fw_mag,
-                    normal.y * fw_mag,
-                    normal.z * fw_mag,
-                };
-                const vector_3d_t fwt = {
-                    .x = vft.x - fw[0],
-                    .y = vft.y - fw[1],
-                    .z = vft.z - fw[2],
-                };
-                const double fwt_mag2 = magnitude_squared(&fwt);
-                double fwt_mag = 0.0;
-                vector_3d_t fwt_direction = {
-                    .x = 0,
-                    .y = 0,
-                    .z = 0,
-                };
-                if (fwt_mag2 > 0.0) {
-                    fwt_mag = sqrt(fwt_mag2);
-                    fwt_direction = fwt;
-                    normalize(&fwt_direction);
-                }
-
-                const vector_3d_t f_ct_n = {
-                    .x = fw[0] - fn[0],
-                    .y = fw[1] - fn[1],
-                    .z = fw[2] - fn[2],
-                };
-
-                const double fwt_max_mag = mu_wall * sqrt(magnitude_squared(&f_ct_n));
-
-                // Take smaller of the applied tangential forces (either
-                // bounded by friction coefficient or by test force required
-                // from velocity) and put it in the correct direction.
-                const double fwt_mag_end_of_step = std::min(fwt_mag, fwt_max_mag);
-
-                // fw is the normal part, fwt term is tangential. This deltaf
-                // can be considered the force applied by the contact. Note
-                // that we are force the normal term to a specific value (to
-                // ensure no penetration through the boundary), but the
-                // tangential term is added onto the existing forces.
-                const double deltaf[] = {
-                    s * (f_ct_n.x + (fwt_mag_end_of_step * fwt_direction.x - ftt.x)),
-                    s * (f_ct_n.y + (fwt_mag_end_of_step * fwt_direction.y - ftt.y)),
-                    s * (f_ct_n.z + (fwt_mag_end_of_step * fwt_direction.z - ftt.z)),
-                };
-
-                f[i][0] = deltaf[0] + f[i][0];
-                f[i][1] = deltaf[1] + f[i][1];
-                f[i][2] = deltaf[2] + f[i][2];
-
-                stress[i][6] = deltaf[0];
-                stress[i][7] = deltaf[1];
-                stress[i][8] = deltaf[2];
-#endif
-                // facet_index
-                // const double mu_wall = 0.3;
-
                 const vector_3d_t normal = fdir;
 
                 const vector_3d_t ft = {
@@ -1279,9 +1195,9 @@ void FixRHEO::post_force(int /*vflag*/)
                 };
 
                 const vector_3d_t vt = {
-                    .x = v[i][0],
-                    .y = v[i][1],
-                    .z = v[i][2],
+                    .x = v[i][0] - vwall.x,
+                    .y = v[i][1] - vwall.y,
+                    .z = v[i][2] - vwall.z,
                 };
 
                 const vector_3d_t vtr = {
