@@ -945,7 +945,12 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
 
                     // rethink how this should be done with mixing.
                     if (s == *sdf) {
+                        *facet_index = ii * 1000 + i;
                         *mu_wall = args.mu;
+
+                        // Uncomment to make "largest (normalized) force wins"
+                        // N.B. Shouldn't we actually do largest dimensioned force wins??
+                        *normal = my_normal;
 
                         double vwall[3] = {0};
                         region->velocity_contact(vwall, xp_array, i);
@@ -1120,6 +1125,14 @@ void FixRHEO::post_force(int /*vflag*/)
         dtfm = dtf / mass[type[i]];
       }
 
+        // Uncomment to make the wall reflect particles instead of placing them
+        // exactly at the edge.
+        // const double ftest[] = {
+        //     -2.0 * v[i][0] / dtfm,
+        //     -2.0 * v[i][1] / dtfm,
+        //     -2.0 * v[i][2] / dtfm,
+        // };
+
         const double ftest[] = {
             -v[i][0] / dtfm,
             -v[i][1] / dtfm,
@@ -1168,6 +1181,7 @@ void FixRHEO::post_force(int /*vflag*/)
         stress[i][13] = xp.x;
         stress[i][14] = xp.y;
         stress[i][15] = xp.z;
+        stress[i][16] = facet_index;
         // stress[i][16] = in_dead_zone;
         stress[i][17] = walls_bitset;
         stress[i][18] = ftest[0];
