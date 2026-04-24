@@ -892,6 +892,9 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
         0.0,
     };
 
+    // FIXME: For some reason, this scheme does not work with regions that are
+    // unions. I need to investigate, because I usually forget this when making
+    // complex shapes and then the simulation does not look correct at all.
 
     // Do first to get all contacts in all regions.
     for (size_t ii = 0; ii < region_list.size(); ++ii) {
