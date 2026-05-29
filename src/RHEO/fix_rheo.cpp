@@ -881,7 +881,9 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
         const std::vector<Region *> &region_list,
         const std::vector<struct boundary_args> &boundary_arg_list,
         std::vector<int> &nc,
-        vector_3d_t *vw
+        vector_3d_t *vw,
+        double *out_r,
+        double *out_boundary_thickness
     // Region *boundary_region
 )
 {
@@ -907,6 +909,8 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
         }
     }
 
+    double min_r = DBL_MAX;
+
     for (size_t ii = 0; ii < region_list.size(); ++ii) {
         auto region = region_list[ii];
         const auto & args = boundary_arg_list[ii];
@@ -922,7 +926,7 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
                     };
 
                     // Now we need to go over all other contacts, including in
-                    // other regions. 
+                    // other regions.
                     for (size_t jj = 0; jj < region_list.size(); ++jj) {
                         auto other_region = region_list[jj];
                         const auto & other_args = boundary_arg_list[jj];
@@ -944,16 +948,25 @@ static void sdf_and_normal_from_regions(double *sdf, vector_3d_t *normal, size_t
                     const double r = region->contact[i].r / args.thickness;
                     const double s = clamp_unity((1.0 - r) / 0.9);
                     // printf("i = %zu, s = %g, nhat = (%g, %g, %g)\n", i, s, my_normal.x, my_normal.y, my_normal.z);
-                    *sdf = std::max(s, *sdf);
 
                     // rethink how this should be done with mixing.
-                    if (s == *sdf) {
+
+                    // UNCOMMENT TO USE NORMALIZES STRENGTH AS DISCRIMINATOR
+                    // *sdf = std::max(s, *sdf);
+                    // if (s == *sdf) {
+
+                    min_r = std::min(r, min_r);
+                    if (r == min_r) {
+                        *sdf = s;
                         *facet_index = ii * 1000 + i;
                         *mu_wall = args.mu;
 
                         // Uncomment to make "largest (normalized) force wins"
                         // N.B. Shouldn't we actually do largest dimensioned force wins??
                         *normal = my_normal;
+
+                        *out_r = r;
+                        *out_boundary_thickness = args.thickness;
 
                         double vwall[3] = {0};
                         region->velocity_contact(vwall, xp_array, i);
@@ -1136,17 +1149,20 @@ void FixRHEO::post_force(int /*vflag*/)
         //     -2.0 * v[i][2] / dtfm,
         // };
 
-        const double ftest[] = {
-            -v[i][0] / dtfm,
-            -v[i][1] / dtfm,
-            -v[i][2] / dtfm,
-        };
+        // OLD FTEST, sets velocity to zero at boundary exactly (has an issue with curvature)
+        // const double ftest[] = {
+        //     -v[i][0] / dtfm,
+        //     -v[i][1] / dtfm,
+        //     -v[i][2] / dtfm,
+        // };
 
         const vector_3d_t xp = {
             .x = x[i][0],
             .y = x[i][1],
             .z = x[i][2],
         };
+
+        stress[i][29] = hypot(xp.x, xp.y);
 
         vector_3d_t fdir = {
             0.0,
@@ -1160,7 +1176,24 @@ void FixRHEO::post_force(int /*vflag*/)
         size_t facet_index = 0;
         double mu_wall = 0.0;
         vector_3d_t vwall = {0};
-        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc, &vwall);
+
+        double r = 0.0;
+        double th = 0.0;
+        sdf_and_normal_from_regions(&s, &fdir, &facet_index, &is_any_wall_sticky, &xp, &mu_wall, boundary_regions, boundary_args, nc, &vwall, &r, &th);
+
+        // Modified ftest to place particle at exactly the boundary region away
+        // from the surface.
+        // (void) r;
+        // (void) th;
+        const double dt2fm = dtfm / update->dt;
+        const double rr = th - r;
+        const double sr = (rr > 0.0) ? th : 0.0;
+        const double ftest[] = {
+            (sr * (fdir.x) / dt2fm) - (v[i][0] / dtfm),
+            (sr * (fdir.y) / dt2fm) - (v[i][1] / dtfm),
+            (sr * (fdir.z) / dt2fm) - (v[i][2] / dtfm),
+        };
+
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
         // bool is_any_wall_sticky = false;
