@@ -1185,14 +1185,25 @@ void FixRHEO::post_force(int /*vflag*/)
         // from the surface.
         // (void) r;
         // (void) th;
-        const double dt2fm = dtfm / update->dt;
-        const double rr = th - r;
+        const double dtfm2 = 2.0 * dtfm;
+        // This is the "100 percent zone", and the edge of where we want to put
+        // the particle back to at the end of the step, in units of the wall
+        // thickness (i.e. 0.1 => 10 percent of the thickness is used as the
+        // 100% zone).
+        const double skin_distance_ratio = 0.1;
+        const double rr = th * (skin_distance_ratio - r);
         const double sr = (rr > 0.0) ? th : 0.0;
+        const double rdt = sr / update->dt;
         const double ftest[] = {
-            (sr * (fdir.x) / dt2fm) - (v[i][0] / dtfm),
-            (sr * (fdir.y) / dt2fm) - (v[i][1] / dtfm),
-            (sr * (fdir.z) / dt2fm) - (v[i][2] / dtfm),
+            ((rdt * fdir.x) - v[i][0]) / dtfm2,
+            ((rdt * fdir.y) - v[i][1]) / dtfm2,
+            ((rdt * fdir.z) - v[i][2]) / dtfm2,
         };
+
+        // Force full strength if within the skin distance.
+        if (sr > 0.0) {
+            s = 1.0;
+        }
 
         // uint64_t walls_bitset = 0;
         // boundary_force_direction_from_levelset(&s, &fdir, &walls_bitset, &xp);
