@@ -28,6 +28,7 @@
 #include "error.h"
 #include "fix_rheo.h"
 #include "fix_rheo_stress.h"
+#include "fix_store_atom.h"
 #include "force.h"
 #include "math_extra.h"
 #include "memory.h"
@@ -107,7 +108,7 @@ void PairRHEOGranular::compute(int eflag, int vflag)
   double *rho = atom->rho;
   double *drho = atom->drho;
   double *mass = atom->mass;
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
   double *special_lj = force->special_lj;
   int *type = atom->type;
   int *status = atom->rheo_status;

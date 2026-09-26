@@ -40,10 +40,13 @@ class FixRHEOStress : public Fix {
   // Hack so I can set fix_rheo in this later
   class Compute *stress_compute;
 
+  // Hack so the array_atom pointer doesn't get invalidated.
+  class FixStoreAtom *store_fix;
+
  private:
   char *id_compute, *id_fix;
   // class Compute *stress_compute;
-  class FixStoreAtom *store_fix;
+  // class FixStoreAtom *store_fix;
   std::string property_list_for_compute;
 };
 

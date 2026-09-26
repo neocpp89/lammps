@@ -24,6 +24,7 @@
 #include "error.h"
 #include "fix_rheo.h"
 #include "fix_rheo_pressure.h"
+#include "fix_store_atom.h"
 #include "force.h"
 #include "math_extra.h"
 #include "fix_rheo_stress.h"
@@ -132,7 +133,7 @@ void ComputeRHEOInterface::compute_peratom()
   int *status = atom->rheo_status;
   double *rho = atom->rho;
   double **fp_store = atom->darray[index_fp_store];
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
 
   inum = list->inum;
   ilist = list->ilist;
@@ -250,7 +251,7 @@ int ComputeRHEOInterface::pack_forward_comm(int n, int *list, double *buf, int /
 {
   double *rho = atom->rho;
   double **fp_store = atom->darray[index_fp_store];
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
   int m = 0;
 
   for (int i = 0; i < n; i++) {
@@ -274,7 +275,7 @@ void ComputeRHEOInterface::unpack_forward_comm(int n, int first, double *buf)
 {
   double *rho = atom->rho;
   double **fp_store = atom->darray[index_fp_store];
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
 
   int m = 0;
   int last = first + n;
@@ -296,7 +297,7 @@ void ComputeRHEOInterface::unpack_forward_comm(int n, int first, double *buf)
 int ComputeRHEOInterface::pack_reverse_comm(int n, int first, double *buf)
 {
   double *rho = atom->rho;
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
   int m = 0;
   int last = first + n;
   for (int i = first; i < last; i++) {
@@ -315,7 +316,7 @@ void ComputeRHEOInterface::unpack_reverse_comm(int n, int *list, double *buf)
 {
   double *rho = atom->rho;
   int *status = atom->rheo_status;
-  double **stress = fix_stress->array_atom;
+  double **stress = fix_stress->store_fix->astore;
   int m = 0;
   for (int i = 0; i < n; i++) {
     int j = list[i];
