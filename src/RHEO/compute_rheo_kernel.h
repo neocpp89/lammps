@@ -44,7 +44,7 @@ class ComputeRHEOKernel : public Compute {
   double calc_dw_quintic(double, double, double, double, double *, double *);
   double calc_w_wendlandc4(double);
   double calc_dw_wendlandc4(double, double, double, double, double *, double *);
-  double calc_w_cubic(int,int,double,double,double,double);
+  double calc_w_cubic(double);
   double calc_dw_cubic(int,int,double,double,double,double,double *,double *);
   void grow_arrays(int);
 

@@ -182,6 +182,8 @@ double ComputeRHEOKernel::calc_w_self()
 {
   if (kernel_style == WENDLANDC4)
     return calc_w_wendlandc4(0.0);
+  else if (kernel_style == CUBIC)
+    return calc_w_cubic(0.0);
   else
     return calc_w_quintic(0.0);
 }
@@ -195,7 +197,7 @@ double ComputeRHEOKernel::calc_w(int i, int j, double delx, double dely, double 
   if (kernel_style == QUINTIC)
     return calc_w_quintic(r);
   if (kernel_style == CUBIC)
-    return calc_w_cubic(i,j,delx,dely,delz,r);
+    return calc_w_cubic(r);
 
   double w = 0.0;
   int corrections_i = check_corrections(i);
@@ -252,19 +254,19 @@ double ComputeRHEOKernel::calc_dw(int i, int j, double delx, double dely, double
 
 /* ---------------------------------------------------------------------- */
 
-double ComputeRHEOKernel::calc_w_cubic(int i, int j, double delx, double dely, double delz, double r)
+double ComputeRHEOKernel::calc_w_cubic(double r)
 {
-  double w, tmp1, tmp2, tmp3, tmp1sq, tmp2sq, tmp3sq, s;
+  double w, s;
   s = r * 2.0 * cutinv;
 
-	if (s > 2.0) {
-	  w = 0.0;
-	} else if (s <= 2.0) {
-      w = (2.0 - s);
-      w = (w * w * w) / 6.0;
-	} else if (s <= 1.0) {
-      w = (2.0 / 3.0) - (s * s) + ((s * s * s) / 2.0);
-	}
+  if (s <= 1.0) {
+    w = (2.0 / 3.0) - (s * s) + ((s * s * s) / 2.0);
+  } else if (s <= 2.0) {
+    w = (2.0 - s);
+    w = (w * w * w) / 6.0;
+  } else if (s > 2.0) {
+    w = 0.0;
+  }
 
   w *= alpha_d;
 
@@ -284,17 +286,17 @@ double ComputeRHEOKernel::calc_dw_cubic(int i, int j, double delx, double dely, 
 
   s = r * 2.0 * cutinv;
 
-  if (s > 2.0) {
-    wp = 0.0;
+  if (s <= 1.0) {
+    wp = -(2.0 * s) + (3.0 / 2.0) * (s * s);
   } else if (s <= 2.0) {
     wp = (2.0 - s);
     wp = -(wp * wp) / 2.0;
-  } else if (s <= 1.0) {
-    wp = -(2.0 * s) + (3.0 / 2.0) * (s * s);
+  } else if (s > 2.0) {
+    wp = 0.0;
   }
 
-  wp *= alpha_d;
-  wprinv = wp / (r * cut);
+  wp *= alpha_d * 2.0 * cutinv;
+  wprinv = wp / r;
   dW1[0] = delx * wprinv;
   dW1[1] = dely * wprinv;
   dW1[2] = delz * wprinv;
