@@ -112,10 +112,6 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
 
   nmax_store = 0;
   grow_arrays(atom->nmax);
-
-  for (int i = 0; i < nmax_store; i++)
-    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++)
-      stress[i][a] = 0.0;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -161,17 +157,7 @@ void ComputeRHEOStress::init()
   DUMP_PROPERTY(PHI_MIN);
   DUMP_PROPERTY(XI);
 
-  // This does not seem like something we should set in the constitutive
-  // relation, but it is a state variable known by the constitutive model.
-  // Discuss how we want to bring this in, since we may want to do something
-  // spatially dependent in the lammps inputs file.
   DUMP_PROPERTY(PHI_D_0);
-
-  for (int i = 0; i < nmax_store; i++)
-  {
-      stress[i][27] = PHI_D_0;
-  }
-
 
   one_element_test();
 }
@@ -798,6 +784,12 @@ void ComputeRHEOStress::set_arrays(int i)
     for (int a = 0; a < NUM_STRESS_COMPONENTS; a++) {
       stress[i][a] = 0.0;
     }
+
+    // This does not seem like something we should set in the constitutive
+    // relation, but it is a state variable known by the constitutive model.
+    // Discuss how we want to bring this in, since we may want to do something
+    // spatially dependent in the lammps inputs file.
+    stress[i][27] = PHI_D_0;
 }
 
 void ComputeRHEOStress::compute_peratom()
@@ -942,6 +934,9 @@ void ComputeRHEOStress::grow_arrays(int nmax)
 {
   memory->grow(stress, nmax, NUM_STRESS_COMPONENTS, "rheo:stress");
   array_atom = stress;
+  for (int i = nmax_store; i < nmax; ++i) {
+    set_arrays(i);
+  }
   nmax_store = nmax;
 }
 
