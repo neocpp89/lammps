@@ -19,11 +19,11 @@
 #include "compute_rheo_stress.h"
 
 #include "atom.h"
-#include "comm.h"
 #include "compute_rheo_grad.h"
 #include "domain.h"
 #include "error.h"
 #include "fix_rheo.h"
+#include "fix_store_atom.h"
 #include "force.h"
 #include "memory.h"
 #include "update.h"
@@ -50,7 +50,7 @@ struct compute_material_property {
 
 /* ---------------------------------------------------------------------- */
 ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
-  Compute(lmp, narg, arg), list(nullptr), stress(nullptr), fix_rheo(nullptr)
+  Compute(lmp, narg, arg), list(nullptr), fix_rheo(nullptr), fix_store(nullptr)
 {
   // TODO: args for material params
   // if (narg < 4) error->all(FLERR,"Illegal compute rheo/grad command");
@@ -106,19 +106,12 @@ ComputeRHEOStress::ComputeRHEOStress(LAMMPS *lmp, int narg, char **arg) :
 
   size_peratom_cols = NUM_STRESS_COMPONENTS;
   peratom_flag = 1;
-  comm_forward = NUM_STRESS_COMPONENTS;
-  comm_reverse = NUM_STRESS_COMPONENTS;
-  create_attribute = 1;
-
-  nmax_store = 0;
-  grow_arrays(atom->nmax);
 }
 
 /* ---------------------------------------------------------------------- */
 
 ComputeRHEOStress::~ComputeRHEOStress()
 {
-  memory->destroy(stress);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -779,31 +772,21 @@ void ComputeRHEOStress::one_element_test(void)
 
 /* ---------------------------------------------------------------------- */
 
-void ComputeRHEOStress::set_arrays(int i)
+void ComputeRHEOStress::compute_peratom()
 {
-    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++) {
-      stress[i][a] = 0.0;
-    }
+  if (fix_store == nullptr) {
+    error->all(FLERR, "fix store for stress not set");
+  }
 
-    // This does not seem like something we should set in the constitutive
-    // relation, but it is a state variable known by the constitutive model.
-    // Discuss how we want to bring this in, since we may want to do something
-    // spatially dependent in the lammps inputs file.
-    stress[i][27] = PHI_D_0;
+  invoked_peratom = update->ntimestep;
+  array_atom = fix_store->astore;
 }
 
-void ComputeRHEOStress::compute_peratom()
+/* ---------------------------------------------------------------------- */
+void ComputeRHEOStress::update_stress(void)
 {
   int i;
   const int nlocal = atom->nlocal;
-
-  // grow local stress array if necessary
-  // needs to be atom->nmax in length
-
-  // if (atom->nmax > nmax_store) {
-  //   memory->destroy(stress);
-  //   grow_arrays(atom->nmax);
-  // }
 
   if (fix_rheo == nullptr) {
     error->all(FLERR, "fix rheo not set");
@@ -813,14 +796,16 @@ void ComputeRHEOStress::compute_peratom()
     error->all(FLERR, "fix rheo gradient computation not set");
   }
 
+  if (fix_store == nullptr) {
+    error->all(FLERR, "fix store for stress not set");
+  }
+
   // TODO: fix, violates Law of Demeter
   double **velocity_gradient = fix_rheo->compute_grad->gradv;
   const double *rho = atom->rho;
 
-  // initialize arrays
-  if (atom->nmax > nmax_store) {
-    grow_arrays(atom->nmax);
-  }
+  // local only, do not attempt to cache separately
+  double **stress = fix_store->astore;
 
   for (i = 0; i < nlocal; ++i) {
     double *T = stress[i];
@@ -866,83 +851,4 @@ void ComputeRHEOStress::compute_peratom()
     // }
   }
 
-}
-
-/* ---------------------------------------------------------------------- */
-
-int ComputeRHEOStress::pack_forward_comm(int n, int *list, double *buf,
-                                        int pbc_flag, int *pbc)
-{
-  int i,j,k,m;
-
-  m = 0;
-  for (i = 0; i < n; i++) {
-    j = list[i];
-    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
-      buf[m++] = stress[j][k];
-  }
-  return m;
-}
-
-/* ---------------------------------------------------------------------- */
-
-void ComputeRHEOStress::unpack_forward_comm(int n, int first, double *buf)
-{
-  int i, k, m, last;
-
-  m = 0;
-  last = first + n;
-  for (i = first; i < last; i++) {
-    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
-      stress[i][k] = buf[m++];
-  }
-}
-
-/* ---------------------------------------------------------------------- */
-
-int ComputeRHEOStress::pack_reverse_comm(int n, int first, double *buf)
-{
-  int i,k,m,last;
-
-  m = 0;
-  last = first + n;
-  for (i = first; i < last; i++) {
-    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
-      buf[m++] = stress[i][k];
-  }
-  return m;
-}
-
-/* ---------------------------------------------------------------------- */
-
-void ComputeRHEOStress::unpack_reverse_comm(int n, int *list, double *buf)
-{
-  int i,k,j,m;
-
-  m = 0;
-  for (i = 0; i < n; i++) {
-    j = list[i];
-    for (k = 0; k < NUM_STRESS_COMPONENTS; k++)
-      stress[j][k] = buf[m++];
-      // stress[j][k] += buf[m++];
-  }
-}
-
-/* ---------------------------------------------------------------------- */
-
-void ComputeRHEOStress::grow_arrays(int nmax)
-{
-  memory->grow(stress, nmax, NUM_STRESS_COMPONENTS, "rheo:stress");
-  array_atom = stress;
-  for (int i = nmax_store; i < nmax; ++i) {
-    set_arrays(i);
-  }
-  nmax_store = nmax;
-}
-
-/* ---------------------------------------------------------------------- */
-
-double ComputeRHEOStress::memory_usage()
-{
-  return (size_t) nmax_store * NUM_STRESS_COMPONENTS * sizeof(double);
 }

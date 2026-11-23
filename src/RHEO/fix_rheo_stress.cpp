@@ -48,7 +48,7 @@ struct material_property {
 /* ---------------------------------------------------------------------- */
 
 FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
-  id_compute(nullptr), id_fix(nullptr), stress_compute(nullptr), store_fix(nullptr), Fix(lmp, narg, arg)
+  id_compute(nullptr), id_fix(nullptr), stress_compute(nullptr), store_fix(nullptr), Fix(lmp, narg, arg), phi_d_0(0.0)
 {
   struct material_property properties[] = {
     { .required = true, .name = "rho_critical", .value = 1.0, .set_by_input_file = false, },
@@ -67,6 +67,7 @@ FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   };
 
   comm_forward = NUM_STRESS_COMPONENTS;
+  create_attribute = 1;
 
   int iarg = 3;
   while (iarg < narg) {
@@ -96,6 +97,9 @@ FixRHEOStress::FixRHEOStress(LAMMPS *lmp, int narg, char **arg) :
   for (size_t i = 0; i < DIM(properties); ++i) {
     struct material_property * const entry = &properties[i];
     property_list_for_compute += fmt::format("{} {:.17g} ", entry->name, entry->value);
+    if (strcmp(entry->name, "phi_d_0") == 0) {
+      phi_d_0 = entry->value;
+    }
   }
 }
 
@@ -119,6 +123,18 @@ void FixRHEOStress::post_constructor()
   id_compute = utils::strdup(std::string(id) + "_compute");
   // stress_compute = modify->add_compute(fmt::format("{} {} stress/atom NULL ke pair bond", id_compute, group->names[igroup]));
   stress_compute = modify->add_compute(fmt::format("{} {} RHEO/STRESS {}", id_compute, group->names[igroup], property_list_for_compute));
+
+  // compute will use this to store stress data
+  dynamic_cast<ComputeRHEOStress *>(stress_compute)->fix_store = store_fix;
+
+  const int nmax = atom->nlocal;
+  for (int i = 0; i < nmax; ++i)
+  {
+    // Newly added, initialize it.
+    if (store_fix->astore[i][27] == 0.0) {
+      set_arrays(i);
+    }
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -142,17 +158,7 @@ void FixRHEOStress::init()
 
 void FixRHEOStress::pre_force(int vflag)
 {
-  stress_compute->compute_peratom();
-
-  // copy compute to fix property atom
-  double **saved_stress = store_fix->astore;
-  double **stress = stress_compute->array_atom;
-
-  const int ntotal = atom->nlocal+atom->nghost;
-  for (int i = 0; i < ntotal; i++)
-    for (int a = 0; a < NUM_STRESS_COMPONENTS; a++)
-      saved_stress[i][a] = stress[i][a];
-
+  dynamic_cast<ComputeRHEOStress *>(stress_compute)->update_stress();
   stress_compute->addstep(update->ntimestep + 1);
 
   // add pre-force and forward to ghosts (not done in store/atom)
@@ -194,4 +200,25 @@ void FixRHEOStress::unpack_forward_comm(int n, int first, double *buf)
   for (i = first; i < last; i++)
     for (a = 0; a < NUM_STRESS_COMPONENTS; a++)
       saved_stress[i][a] = buf[m++];
+}
+
+/* ---------------------------------------------------------------------- */
+
+void FixRHEOStress::set_arrays(int i)
+{
+  if (store_fix == nullptr) {
+    error->all(FLERR, "fix store for stress not set");
+  }
+
+  double **stress = store_fix->astore;
+
+  for (int a = 0; a < NUM_STRESS_COMPONENTS; a++) {
+    stress[i][a] = 0.0;
+  }
+
+  // This does not seem like something we should set in the constitutive
+  // relation, but it is a state variable known by the constitutive model.
+  // Discuss how we want to bring this in, since we may want to do something
+  // spatially dependent in the lammps inputs file.
+  stress[i][27] = phi_d_0;
 }

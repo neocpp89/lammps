@@ -21,6 +21,7 @@ ComputeStyle(RHEO/STRESS,ComputeRHEOStress)
 #define LMP_COMPUTE_RHEO_STRESS_H
 
 #include "compute.h"
+#include "fix.h"
 
 namespace LAMMPS_NS {
 
@@ -31,27 +32,20 @@ class ComputeRHEOStress : public Compute {
   void init() override;
   void init_list(int, class NeighList *) override;
   void compute_peratom() override;
-  int pack_forward_comm(int, int *, double *, int, int *) override;
-  void unpack_forward_comm(int, int, double *) override;
-  int pack_reverse_comm(int, int, double *) override;
-  void unpack_reverse_comm(int, int *, double *) override;
-  double memory_usage() override;
-  void set_arrays(int) override;
 
   void update_one_material_point_stress_elastic(double *stress, const double *velocity_gradient, double density, double dt, int dim);
   void update_one_material_point_stress(double *pphi_d, double *ptxxdev, double *rho_pressure, double *ptr_t0, double *pnup_tau, double *cauchy_stress, const double *velocity_gradient, double density, double dt, int dim);
   // void update_one_material_point_stress(double *stress, const double *velocity_gradient, double density, double dt, int dim);
   void one_element_test(void);
 
-  double **stress;
+  void update_stress(void);
+
   class FixRHEO *fix_rheo;
 
+  class FixStoreAtom *fix_store;
+
  private:
-  int nmax_store;
-
   class NeighList *list;
-
-  void grow_arrays(int);
 
   // Set by input file
   double RHO_CRITICAL;

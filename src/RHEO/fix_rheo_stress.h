@@ -36,6 +36,7 @@ class FixRHEOStress : public Fix {
   void end_of_step() override;
   int pack_forward_comm(int, int *, double *, int, int *) override;
   void unpack_forward_comm(int, int, double *) override;
+  void set_arrays(int i) override;
 
   // Hack so I can set fix_rheo in this later
   class Compute *stress_compute;
@@ -48,6 +49,7 @@ class FixRHEOStress : public Fix {
   // class Compute *stress_compute;
   // class FixStoreAtom *store_fix;
   std::string property_list_for_compute;
+  double phi_d_0;
 };
 
 }    // namespace LAMMPS_NS
