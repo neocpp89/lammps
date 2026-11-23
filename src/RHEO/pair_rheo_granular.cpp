@@ -202,17 +202,26 @@ void PairRHEOGranular::compute(int eflag, int vflag)
 
             fp_prefactor = 0;
             sub3(vi, vj, dv);
-            copy3(dv, du);
-            for (a = 0; a < dim; a++)
-              for (b = 0; b < dim; b++)
-                du[a] -= 0.5 * (gradv[i][a * dim + b] + gradv[j][a * dim + b]) * dx[b];
 
-            mu = dot3(du, dx) * hinv3;
-            mu /= (rsq * hinv3 * hinv3 + EPSILON);
-            mu = MIN(0.0, mu);
-            q = av * (-2.0 * cs[itype] * mu + mu * mu);
-            fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
-            scale3(-fp_prefactor, dWij, dfp);
+            // Only apply artificial viscosity if moving towards each other.
+            if (dot3(dv, dx) < 0.0)
+            {
+              copy3(dv, du);
+              for (a = 0; a < dim; a++)
+                for (b = 0; b < dim; b++)
+                  du[a] -= 0.5 * (gradv[i][a * dim + b] + gradv[j][a * dim + b]) * dx[b];
+
+              mu = dot3(du, dx) * hinv3;
+              mu /= (rsq * hinv3 * hinv3 + EPSILON);
+              mu = MIN(0.0, mu);
+              q = av * (-2.0 * cs[itype] * mu + mu * mu);
+              fp_prefactor += Voli * Volj * q * (rhoj + rhoi);
+              scale3(-fp_prefactor, dWij, dfp);
+            }
+            else
+            {
+              zero3(dfp);
+            }
 
         // Add contributions to stress divergence
         // stress is in Voigt form in order: XX, YY, ZZ, XY, XZ, YZ
